@@ -5,7 +5,9 @@
 
 import { OllamaProfile, OllamaProfileCreate, OllamaProfileUpdate } from "@/types";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost/api";
+// Use a relative URL so the browser always calls back to the host that served the page.
+// This works correctly whether accessed from localhost or another machine on the network.
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "/api";
 
 // Token management
 export function getToken(): string | null {
