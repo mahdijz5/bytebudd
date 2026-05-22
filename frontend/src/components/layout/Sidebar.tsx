@@ -2,17 +2,18 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { MessageSquare, Database, Plus, LogOut, Bot } from "lucide-react";
+import { MessageSquare, Database, Plus, LogOut, Bot, Cpu } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { logout } from "@/lib/auth";
-import { Conversation } from "@/types";
+import { Conversation, User } from "@/types";
 
 interface SidebarProps {
   conversations: Conversation[];
   onNewConversation: () => void;
+  user?: User | null;
 }
 
-export function Sidebar({ conversations, onNewConversation }: SidebarProps) {
+export function Sidebar({ conversations, onNewConversation, user }: SidebarProps) {
   const pathname = usePathname();
 
   return (
@@ -35,6 +36,15 @@ export function Sidebar({ conversations, onNewConversation }: SidebarProps) {
         <NavLink href="/databases" icon={<Database className="w-4 h-4" />} active={pathname === "/databases"}>
           Databases
         </NavLink>
+        {user?.role === "admin" && (
+          <NavLink
+            href="/admin/ollama-profiles"
+            icon={<Cpu className="w-4 h-4" />}
+            active={pathname.startsWith("/admin/ollama-profiles")}
+          >
+            Ollama Profiles
+          </NavLink>
+        )}
       </nav>
 
       {/* New conversation button */}

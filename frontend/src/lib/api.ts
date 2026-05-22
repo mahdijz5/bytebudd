@@ -3,6 +3,8 @@
  * All requests go through /api prefix (proxied by Nginx to backend:8000).
  */
 
+import { OllamaProfile, OllamaProfileCreate, OllamaProfileUpdate } from "@/types";
+
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost/api";
 
 // Token management
@@ -141,7 +143,9 @@ export async function streamQuery(
   dbConnectionId: number,
   onEvent: (event: string, data: unknown) => void,
   onDone: () => void,
-  onError: (error: string) => void
+  onError: (error: string) => void,
+  profileId?: number | null,
+  modelName?: string | null,
 ): Promise<void> {
   const token = getToken();
 
@@ -155,6 +159,8 @@ export async function streamQuery(
       question,
       conversation_id: conversationId,
       db_connection_id: dbConnectionId,
+      profile_id: profileId ?? null,
+      model_name: modelName ?? null,
     }),
   });
 
@@ -207,3 +213,38 @@ export async function streamQuery(
     }
   }
 }
+
+// ── Ollama Profile API ────────────────────────────────────────────────────
+
+export const ollamaProfileApi = {
+  fetchModels: (host_url: string) =>
+    apiFetch<{ models: string[] }>("/ollama-profiles/fetch-models", {
+      method: "POST",
+      body: JSON.stringify({ host_url }),
+    }),
+
+  list: () => apiFetch<OllamaProfile[]>("/ollama-profiles/"),
+
+  create: (data: OllamaProfileCreate) =>
+    apiFetch<OllamaProfile>("/ollama-profiles/", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  update: (id: number, data: OllamaProfileUpdate) =>
+    apiFetch<OllamaProfile>(`/ollama-profiles/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
+
+  delete: (id: number) =>
+    apiFetch<void>(`/ollama-profiles/${id}`, { method: "DELETE" }),
+
+  setActive: (id: number, is_active: boolean) =>
+    apiFetch<OllamaProfile>(`/ollama-profiles/${id}/active`, {
+      method: "PATCH",
+      body: JSON.stringify({ is_active }),
+    }),
+
+  listActive: () => apiFetch<OllamaProfile[]>("/ollama-profiles/active"),
+};

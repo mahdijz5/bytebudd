@@ -3,8 +3,8 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { isAuthenticated } from "@/lib/auth";
-import { dbApi, conversationApi } from "@/lib/api";
-import { DBConnection, DBConnectionCreate, Conversation } from "@/types";
+import { dbApi, conversationApi, authApi } from "@/lib/api";
+import { DBConnection, DBConnectionCreate, Conversation, User } from "@/types";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { TopNav } from "@/components/layout/TopNav";
 import {
@@ -33,6 +33,7 @@ export default function DatabasesPage() {
   const router = useRouter();
   const [databases, setDatabases] = useState<DBConnection[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [editingDb, setEditingDb] = useState<DBConnection | null>(null);
@@ -49,12 +50,14 @@ export default function DatabasesPage() {
 
   async function loadData() {
     try {
-      const [dbs, convs] = await Promise.all([
+      const [dbs, convs, me] = await Promise.all([
         dbApi.list() as Promise<DBConnection[]>,
         conversationApi.list() as Promise<Conversation[]>,
+        authApi.me() as Promise<User>,
       ]);
       setDatabases(dbs);
       setConversations(convs);
+      setUser(me);
     } finally {
       setLoading(false);
     }
@@ -113,7 +116,7 @@ export default function DatabasesPage() {
 
   return (
     <div className="flex h-screen">
-      <Sidebar conversations={conversations} onNewConversation={handleNewConversation} />
+      <Sidebar conversations={conversations} onNewConversation={handleNewConversation} user={user} />
 
       <div className="flex-1 flex flex-col min-h-0">
         <TopNav title="Database Connections" />

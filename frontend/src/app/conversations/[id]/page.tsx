@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { isAuthenticated } from "@/lib/auth";
-import { conversationApi, dbApi } from "@/lib/api";
+import { conversationApi, dbApi, authApi } from "@/lib/api";
 import { Conversation, ConversationDetail, DBConnection, ChatMessage } from "@/types";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { TopNav } from "@/components/layout/TopNav";
@@ -19,6 +19,7 @@ export default function ConversationPage() {
   const [dbConnection, setDbConnection] = useState<DBConnection | null>(null);
   const [loading, setLoading] = useState(true);
   const [databases, setDatabases] = useState<DBConnection[]>([]);
+  const [user, setUser] = useState<import("@/types").User | null>(null);
 
   useEffect(() => {
     if (!isAuthenticated()) {
@@ -30,14 +31,16 @@ export default function ConversationPage() {
 
   async function loadData() {
     try {
-      const [conv, convs, dbs] = await Promise.all([
+      const [conv, convs, dbs, me] = await Promise.all([
         conversationApi.get(convId) as Promise<ConversationDetail>,
         conversationApi.list() as Promise<Conversation[]>,
         dbApi.list() as Promise<DBConnection[]>,
+        authApi.me(),
       ]);
       setConversation(conv);
       setAllConversations(convs);
       setDatabases(dbs);
+      setUser(me as import("@/types").User);
 
       // Find the connected DB
       if (conv.db_connection_id) {
@@ -101,6 +104,7 @@ export default function ConversationPage() {
       <Sidebar
         conversations={allConversations}
         onNewConversation={handleNewConversation}
+        user={user}
       />
 
       <div className="flex-1 flex flex-col min-h-0">

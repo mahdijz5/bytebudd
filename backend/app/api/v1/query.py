@@ -55,6 +55,8 @@ async def query_stream(
                 db_connection_id=payload.db_connection_id,
                 user_id=current_user.id,
                 db=db,
+                profile_id=payload.profile_id,
+                model_name=payload.model_name,
             ):
                 yield chunk
         except asyncio.CancelledError:

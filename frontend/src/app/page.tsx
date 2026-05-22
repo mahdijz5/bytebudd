@@ -3,8 +3,8 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { isAuthenticated } from "@/lib/auth";
-import { conversationApi, dbApi } from "@/lib/api";
-import { Conversation, DBConnection } from "@/types";
+import { conversationApi, dbApi, authApi } from "@/lib/api";
+import { Conversation, DBConnection, User } from "@/types";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { Database, MessageSquare, Plus, ArrowRight } from "lucide-react";
 
@@ -12,6 +12,7 @@ export default function HomePage() {
   const router = useRouter();
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [databases, setDatabases] = useState<DBConnection[]>([]);
+  const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
 
@@ -25,12 +26,14 @@ export default function HomePage() {
 
   async function loadData() {
     try {
-      const [convs, dbs] = await Promise.all([
+      const [convs, dbs, me] = await Promise.all([
         conversationApi.list() as Promise<Conversation[]>,
         dbApi.list() as Promise<DBConnection[]>,
+        authApi.me() as Promise<User>,
       ]);
       setConversations(convs);
       setDatabases(dbs);
+      setUser(me);
     } catch {
       // silently handle
     } finally {
@@ -60,6 +63,7 @@ export default function HomePage() {
       <Sidebar
         conversations={conversations}
         onNewConversation={handleNewConversation}
+        user={user}
       />
 
       <main className="flex-1 flex flex-col items-center justify-center bg-gray-50 p-8">

@@ -18,9 +18,10 @@ from app.models.conversation import Conversation
 from app.models.message import Message
 from app.models.audit_log import AuditLog
 from app.db_connectors import get_connector
-from app.llm.ollama_client import ollama_client, OllamaError
+from app.llm.ollama_client import ollama_client, OllamaError, generate_with_profile
 from app.prompts.sql_prompt import build_sql_prompt
 from app.services.sql_guard import validate_sql, SQLGuardError
+from app.services.ollama_profile_service import resolve_ollama_config
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,8 @@ async def run_query_pipeline(
     db_connection_id: int,
     user_id: int,
     db: AsyncSession,
+    profile_id: int | None = None,
+    model_name: str | None = None,
 ) -> AsyncIterator[str]:
     """
     Full query pipeline with SSE streaming output.
@@ -97,7 +100,15 @@ async def run_query_pipeline(
         yield _sse_event("thinking", {"message": "Generating SQL with AI..."})
 
         try:
-            raw_sql = await ollama_client.generate(prompt)
+            if profile_id is not None and model_name is not None:
+                # Profile-aware path: resolve host + model from DB
+                host_url, resolved_model = await resolve_ollama_config(
+                    db, profile_id, model_name
+                )
+                raw_sql = await generate_with_profile(host_url, resolved_model, prompt)
+            else:
+                # Legacy env-var path
+                raw_sql = await ollama_client.generate(prompt)
         except OllamaError as e:
             logger.error(f"Ollama error: {e}")
             yield _sse_event("error", {"message": f"AI model error: {e}"})

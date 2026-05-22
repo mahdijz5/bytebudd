@@ -89,3 +89,27 @@ export interface ChatMessage {
   isStreaming?: boolean;
   error?: string;
 }
+
+// ── Ollama Profile types ──────────────────────────────────────────────────
+
+export interface OllamaProfile {
+  id: number;
+  name: string;
+  host_url: string;
+  models: string[];
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OllamaProfileCreate {
+  name: string;
+  host_url: string;
+  models: string[];
+}
+
+export interface OllamaProfileUpdate {
+  name?: string;
+  host_url?: string;
+  models?: string[];
+}

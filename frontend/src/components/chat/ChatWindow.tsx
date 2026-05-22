@@ -5,6 +5,7 @@ import { Send, Loader2 } from "lucide-react";
 import { ChatMessage, SSEResultsEvent } from "@/types";
 import { MessageBubble } from "./MessageBubble";
 import { streamQuery } from "@/lib/api";
+import { ProfileSelector } from "@/components/ollama/ProfileSelector";
 
 interface ChatWindowProps {
   conversationId: number;
@@ -20,6 +21,9 @@ export function ChatWindow({
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [selectedProfileId, setSelectedProfileId] = useState<number | null>(null);
+  const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const [profileReady, setProfileReady] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -33,6 +37,8 @@ export function ChatWindow({
 
     const question = input.trim();
     if (!question || isLoading) return;
+    // Block if profile selection is required but not made
+    if (!profileReady) return;
 
     setInput("");
     setIsLoading(true);
@@ -132,7 +138,10 @@ export function ChatWindow({
             )
           );
           setIsLoading(false);
-        }
+        },
+        // profile selection
+        selectedProfileId,
+        selectedModel,
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
@@ -172,6 +181,22 @@ export function ChatWindow({
 
       {/* Input area */}
       <div className="border-t border-gray-200 bg-white p-4">
+        {/* Profile + model selector */}
+        <ProfileSelector
+          onSelect={(profileId, modelName) => {
+            if (profileId === -1) {
+              setSelectedProfileId(null);
+              setSelectedModel(null);
+              setProfileReady(false);
+            } else {
+              setSelectedProfileId(profileId);
+              setSelectedModel(modelName);
+              setProfileReady(true);
+            }
+          }}
+          disabled={isLoading}
+        />
+
         <form onSubmit={handleSubmit} className="flex gap-3 items-end">
           <textarea
             ref={inputRef}
@@ -186,7 +211,7 @@ export function ChatWindow({
           />
           <button
             type="submit"
-            disabled={isLoading || !input.trim()}
+            disabled={isLoading || !input.trim() || !profileReady}
             className="w-11 h-11 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-200 text-white rounded-xl flex items-center justify-center transition-colors shrink-0"
           >
             {isLoading ? (

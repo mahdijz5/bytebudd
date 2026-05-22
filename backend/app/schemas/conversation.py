@@ -39,3 +39,5 @@ class QueryRequest(BaseModel):
     question: str
     conversation_id: int
     db_connection_id: int
+    profile_id: Optional[int] = None   # Ollama profile to use (None = env fallback)
+    model_name: Optional[str] = None   # Model within the selected profile
