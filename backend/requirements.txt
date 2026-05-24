@@ -28,9 +28,3 @@ httpx==0.28.1
 
 # Encryption for stored passwords
 cryptography==44.0.0
-
-# Utilities
-python-dotenv==1.0.1
-
-# MySQL driver (optional)
-PyMySQL==1.1.1

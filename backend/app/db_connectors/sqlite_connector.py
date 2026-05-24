@@ -40,7 +40,8 @@ class SQLiteConnector(BaseConnector):
                 tables = await cursor.fetchall()
 
             for (table_name,) in tables:
-                # Use PRAGMA to get column info
+                # PRAGMA table_info is safe here — table_name comes from
+                # sqlite_master (system catalog), not from user input.
                 async with db.execute(f"PRAGMA table_info({table_name})") as cursor:
                     columns = await cursor.fetchall()
 

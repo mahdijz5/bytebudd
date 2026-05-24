@@ -61,45 +61,41 @@ export function ChatWindow({
 
     setMessages((prev) => [...prev, userMsg, assistantMsg]);
 
-    // Track SSE state
-    let thinkingText = "";
+    // Track SSE state for the current assistant message
     let sqlText = "";
     let resultsData: SSEResultsEvent | undefined;
-    let explanationText = "";
 
     try {
       await streamQuery(
         question,
         conversationId,
         dbConnectionId,
-        // onEvent
+        // onEvent: called for each SSE event
         (event: string, data: unknown) => {
+          const payload = data as Record<string, unknown>;
+
           setMessages((prev) =>
             prev.map((msg) => {
               if (msg.id !== assistantId) return msg;
 
-              const typedData = data as Record<string, unknown>;
-
               if (event === "thinking") {
-                thinkingText = String(typedData.message || "");
-                return { ...msg, content: thinkingText, isStreaming: true };
+                return { ...msg, content: String(payload.message || ""), isStreaming: true };
               }
 
               if (event === "sql") {
-                sqlText = String(typedData.sql || "");
+                sqlText = String(payload.sql || "");
                 return { ...msg, sql: sqlText, isStreaming: true };
               }
 
               if (event === "results") {
-                resultsData = typedData as unknown as SSEResultsEvent;
+                resultsData = payload as unknown as SSEResultsEvent;
                 return { ...msg, results: resultsData, isStreaming: true };
               }
 
               if (event === "explanation") {
-                explanationText = String(typedData.text || "");
                 return {
                   ...msg,
-                  content: explanationText,
+                  content: String(payload.text || ""),
                   sql: sqlText,
                   results: resultsData,
                   isStreaming: true,
@@ -110,7 +106,7 @@ export function ChatWindow({
                 return {
                   ...msg,
                   content: "",
-                  error: String(typedData.message || "Unknown error"),
+                  error: String(payload.message || "Unknown error"),
                   isStreaming: false,
                 };
               }
@@ -168,7 +164,7 @@ export function ChatWindow({
       {/* Messages */}
       <div className="flex-1 overflow-y-auto py-4">
         {messages.length === 0 ? (
-          <EmptyState />
+          <EmptyState onExampleClick={(text) => setInput(text)} />
         ) : (
           <>
             {messages.map((msg) => (
@@ -229,7 +225,7 @@ export function ChatWindow({
   );
 }
 
-function EmptyState() {
+function EmptyState({ onExampleClick }: { onExampleClick: (text: string) => void }) {
   const examples = [
     "Show me the last 10 orders",
     "How many users registered this month?",
@@ -251,13 +247,7 @@ function EmptyState() {
           <button
             key={example}
             className="text-left text-sm px-4 py-3 bg-white border border-gray-200 rounded-xl hover:border-blue-300 hover:bg-blue-50 transition-colors text-gray-600"
-            onClick={() => {
-              const textarea = document.querySelector("textarea");
-              if (textarea) {
-                textarea.value = example;
-                textarea.dispatchEvent(new Event("input", { bubbles: true }));
-              }
-            }}
+            onClick={() => onExampleClick(example)}
           >
             &ldquo;{example}&rdquo;
           </button>

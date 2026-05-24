@@ -109,37 +109,7 @@ class OllamaClient:
 ollama_client = OllamaClient()
 
 
-# ── Standalone profile-aware helpers ─────────────────────────────────────
-
-async def fetch_models(host_url: str) -> list[str]:
-    """
-    Fetch available model names from a given Ollama host.
-    Used by the profile service — does not depend on the singleton.
-
-    Args:
-        host_url: Base URL of the Ollama server.
-
-    Returns:
-        List of model name strings.
-
-    Raises:
-        OllamaError: On connection failure, timeout, or bad response.
-    """
-    url = f"{host_url.rstrip('/')}/api/tags"
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(url)
-            if response.status_code != 200:
-                raise OllamaError(f"Ollama /api/tags returned HTTP {response.status_code}")
-            data = response.json()
-            return [m["name"] for m in data.get("models", [])]
-    except httpx.TimeoutException:
-        raise OllamaError("Host unreachable: connection timed out")
-    except OllamaError:
-        raise
-    except Exception as e:
-        raise OllamaError(f"Failed to fetch models: {e}")
-
+# ── Profile-aware generation ──────────────────────────────────────────────
 
 async def generate_with_profile(host_url: str, model: str, prompt: str) -> str:
     """
