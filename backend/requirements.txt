@@ -12,8 +12,6 @@ aiosqlite==0.20.0
 # Authentication
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
-bcrypt==4.0.1
-python-multipart==0.0.18
 
 # Validation
 pydantic==2.10.3
@@ -22,6 +20,9 @@ email-validator==2.2.0
 
 # SQL parsing and validation
 sqlglot==26.0.1
+
+# SQL Server connectivity
+pyodbc==5.2.0
 
 # HTTP client (for Ollama)
 httpx==0.28.1

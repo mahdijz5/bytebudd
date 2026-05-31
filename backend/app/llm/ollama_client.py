@@ -1,7 +1,6 @@
 """
 Ollama LLM client for ByteBudd.
-Handles both streaming and non-streaming completion requests.
-Also exposes standalone helpers for profile-aware generation.
+Handles completion requests and model management via the Ollama HTTP API.
 """
 
 import json
@@ -20,8 +19,45 @@ class OllamaError(Exception):
     pass
 
 
+# Shared generation options for all requests
+_GENERATION_OPTIONS = {
+    "temperature": 0.1,  # Low temperature = more deterministic SQL output
+    "top_p": 0.9,
+    "num_predict": 512,  # SQL queries are short; no need for more tokens
+}
+
+
+async def _call_ollama(host_url: str, model: str, prompt: str, timeout: int) -> str:
+    """
+    Send a prompt to an Ollama server and return the generated text.
+
+    This is the single shared implementation used by both the default client
+    and profile-aware generation. Raises OllamaError on any failure.
+    """
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "options": _GENERATION_OPTIONS,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                f"{host_url.rstrip('/')}/api/generate",
+                json=payload,
+            )
+            response.raise_for_status()
+            return response.json().get("response", "").strip()
+    except httpx.TimeoutException:
+        raise OllamaError(f"Ollama request timed out after {timeout}s")
+    except httpx.HTTPStatusError as e:
+        raise OllamaError(f"Ollama HTTP error {e.response.status_code}: {e.response.text}")
+    except Exception as e:
+        raise OllamaError(f"Ollama connection error: {e}")
+
+
 class OllamaClient:
-    """Thin async wrapper around the Ollama HTTP API."""
+    """Thin async wrapper around the Ollama HTTP API using env-var configuration."""
 
     def __init__(self):
         self.base_url = settings.ollama_base_url
@@ -29,7 +65,7 @@ class OllamaClient:
         self.timeout = settings.ollama_timeout
 
     async def is_available(self) -> bool:
-        """Check if Ollama is reachable and the model is ready."""
+        """Check if Ollama is reachable and the configured model is loaded."""
         try:
             async with httpx.AsyncClient(timeout=5) as client:
                 response = await client.get(f"{self.base_url}/api/tags")
@@ -37,56 +73,18 @@ class OllamaClient:
                     return False
                 data = response.json()
                 model_names = [m["name"] for m in data.get("models", [])]
-                # Check if any model name starts with our model (handles :latest suffix)
-                return any(
-                    m.startswith(self.model.split(":")[0]) for m in model_names
-                )
+                # Match by base name to handle tags like ":latest"
+                base_name = self.model.split(":")[0]
+                return any(m.startswith(base_name) for m in model_names)
         except Exception:
             return False
 
     async def generate(self, prompt: str) -> str:
-        """
-        Generate a complete (non-streaming) response from Ollama.
-
-        Args:
-            prompt: The full prompt string.
-
-        Returns:
-            The generated text response.
-
-        Raises:
-            OllamaError: On connection failure or timeout.
-        """
-        payload = {
-            "model": self.model,
-            "prompt": prompt,
-            "stream": False,
-            "options": {
-                "temperature": 0.1,   # Low temp for deterministic SQL
-                "top_p": 0.9,
-                "num_predict": 512,   # SQL queries are short
-            },
-        }
-
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
-                    f"{self.base_url}/api/generate",
-                    json=payload,
-                )
-                response.raise_for_status()
-                data = response.json()
-                return data.get("response", "").strip()
-
-        except httpx.TimeoutException:
-            raise OllamaError(f"Ollama request timed out after {self.timeout}s")
-        except httpx.HTTPStatusError as e:
-            raise OllamaError(f"Ollama HTTP error {e.response.status_code}: {e.response.text}")
-        except Exception as e:
-            raise OllamaError(f"Ollama connection error: {e}")
+        """Generate a SQL query from a prompt using the configured model."""
+        return await _call_ollama(self.base_url, self.model, prompt, self.timeout)
 
     async def pull_model(self) -> AsyncIterator[str]:
-        """Pull/download the configured model from Ollama registry."""
+        """Pull/download the configured model from the Ollama registry."""
         payload = {"name": self.model, "stream": True}
 
         async with httpx.AsyncClient(timeout=600) as client:
@@ -105,53 +103,13 @@ class OllamaClient:
                             continue
 
 
-# Singleton client instance
+# Singleton used by the query pipeline when no profile is selected
 ollama_client = OllamaClient()
 
 
-# ── Profile-aware generation ──────────────────────────────────────────────
-
 async def generate_with_profile(host_url: str, model: str, prompt: str) -> str:
     """
-    Generate a completion using an explicit host URL and model name.
-    Used by the query pipeline when a user has selected an Ollama profile.
-
-    Args:
-        host_url: Base URL of the Ollama server.
-        model: Model name to use.
-        prompt: The full prompt string.
-
-    Returns:
-        The generated text response.
-
-    Raises:
-        OllamaError: On connection failure or timeout.
+    Generate a SQL query using an explicit Ollama host and model.
+    Used when the user has selected a named Ollama profile.
     """
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-        "options": {
-            "temperature": 0.1,
-            "top_p": 0.9,
-            "num_predict": 512,
-        },
-    }
-    timeout = settings.ollama_timeout
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                f"{host_url.rstrip('/')}/api/generate",
-                json=payload,
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data.get("response", "").strip()
-    except httpx.TimeoutException:
-        raise OllamaError(f"Ollama request timed out after {timeout}s")
-    except httpx.HTTPStatusError as e:
-        raise OllamaError(f"Ollama HTTP error {e.response.status_code}: {e.response.text}")
-    except OllamaError:
-        raise
-    except Exception as e:
-        raise OllamaError(f"Ollama connection error: {e}")
+    return await _call_ollama(host_url, model, prompt, settings.ollama_timeout)

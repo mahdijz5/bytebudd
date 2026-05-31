@@ -1,9 +1,10 @@
 """
-Query endpoint - the main feature of ByteBudd.
+Query endpoint — the main feature of ByteBudd.
 Accepts a natural language question and streams back SSE events.
 """
 
 import asyncio
+import json
 import logging
 from typing import AsyncIterator
 
@@ -31,20 +32,17 @@ async def query_stream(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Main query endpoint. Accepts a natural language question and
-    streams back SSE (Server-Sent Events) with thinking/sql/results/done events.
-
-    Use EventSource on the frontend to consume.
+    Main query endpoint. Accepts a natural language question and streams
+    back SSE events: thinking / sql / results / explanation / done / error.
     """
-    # Validate conversation belongs to user
+    # Verify the conversation belongs to this user
     result = await db.execute(
         select(Conversation).where(
             Conversation.id == payload.conversation_id,
             Conversation.user_id == current_user.id,
         )
     )
-    conv = result.scalar_one_or_none()
-    if not conv:
+    if not result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Conversation not found")
 
     async def event_stream() -> AsyncIterator[str]:
@@ -62,8 +60,7 @@ async def query_stream(
         except asyncio.CancelledError:
             logger.info("Client disconnected during streaming")
         except Exception as e:
-            logger.exception(f"Stream error: {e}")
-            import json
+            logger.exception("Stream error: %s", e)
             yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
 
     return StreamingResponse(
@@ -78,8 +75,8 @@ async def query_stream(
 
 
 @router.get("/ollama/status")
-async def ollama_status(current_user: User = Depends(get_current_user)):
-    """Check if Ollama is available and the model is loaded."""
+async def ollama_status(_user: User = Depends(get_current_user)):
+    """Check if Ollama is reachable and the model is loaded."""
     available = await ollama_client.is_available()
     return {
         "available": available,
@@ -89,18 +86,15 @@ async def ollama_status(current_user: User = Depends(get_current_user)):
 
 
 @router.post("/ollama/pull")
-async def pull_model(current_user: User = Depends(get_current_user)):
-    """
-    Pull/download the Ollama model.
-    Streams download progress as SSE.
-    """
+async def pull_model(_user: User = Depends(get_current_user)):
+    """Pull/download the Ollama model. Streams progress as SSE."""
     async def pull_stream():
         try:
             async for status in ollama_client.pull_model():
                 yield f"data: {status}\n\n"
             yield "data: done\n\n"
         except Exception as e:
-            yield f"data: error: {e}\n\n"
+            yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
 
     return StreamingResponse(
         pull_stream(),

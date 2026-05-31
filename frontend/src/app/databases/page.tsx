@@ -27,6 +27,8 @@ interface DBConnectionUpdate {
   username?: string;
   password?: string;
   sqlite_path?: string;
+  instance_name?: string;
+  odbc_driver?: string;
 }
 
 export default function DatabasesPage() {
@@ -330,6 +332,7 @@ function AddConnectionForm({
   }
 
   const isSqlite = form.db_type === "sqlite";
+  const isMssql = form.db_type === "mssql";
 
   return (
     <div className="bg-white border border-gray-200 rounded-2xl p-6 shadow-sm mb-4">
@@ -356,7 +359,13 @@ function AddConnectionForm({
               onChange={(e) => {
                 const t = e.target.value as DBConnectionCreate["db_type"];
                 updateField("db_type", t);
-                updateField("port", t === "mysql" || t === "mariadb" ? 3306 : t === "postgresql" ? 5432 : undefined);
+                updateField(
+                  "port",
+                  t === "mysql" || t === "mariadb" ? 3306
+                  : t === "postgresql" ? 5432
+                  : t === "mssql" ? 1433
+                  : undefined
+                );
               }}
               className="input"
             >
@@ -364,6 +373,7 @@ function AddConnectionForm({
               <option value="mysql">MySQL</option>
               <option value="mariadb">MariaDB</option>
               <option value="sqlite">SQLite</option>
+              <option value="mssql">SQL Server (MSSQL)</option>
             </select>
           </FormField>
         </div>
@@ -435,6 +445,29 @@ function AddConnectionForm({
                 />
               </FormField>
             </div>
+
+            {isMssql && (
+              <div className="grid grid-cols-2 gap-4">
+                <FormField label="Instance Name">
+                  <input
+                    type="text"
+                    value={form.instance_name || ""}
+                    onChange={(e) => updateField("instance_name", e.target.value)}
+                    placeholder="SQLEXPRESS (leave blank for default)"
+                    className="input"
+                  />
+                </FormField>
+                <FormField label="ODBC Driver">
+                  <input
+                    type="text"
+                    value={form.odbc_driver || ""}
+                    onChange={(e) => updateField("odbc_driver", e.target.value)}
+                    placeholder="ODBC Driver 18 for SQL Server"
+                    className="input"
+                  />
+                </FormField>
+              </div>
+            )}
           </>
         )}
 
@@ -476,6 +509,7 @@ function EditConnectionForm({
   onCancel: () => void;
 }) {
   const isSqlite = db.db_type === "sqlite";
+  const isMssql = db.db_type === "mssql";
 
   const [form, setForm] = useState<DBConnectionUpdate>({
     name: db.name,
@@ -485,6 +519,8 @@ function EditConnectionForm({
     username: db.username ?? "",
     password: "",
     sqlite_path: db.database_name, // sqlite stores path in database_name
+    instance_name: db.instance_name ?? "",
+    odbc_driver: db.odbc_driver ?? "",
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -597,6 +633,29 @@ function EditConnectionForm({
                 />
               </FormField>
             </div>
+
+            {isMssql && (
+              <div className="grid grid-cols-2 gap-4">
+                <FormField label="Instance Name">
+                  <input
+                    type="text"
+                    value={form.instance_name ?? ""}
+                    onChange={(e) => updateField("instance_name", e.target.value)}
+                    placeholder="SQLEXPRESS (leave blank for default)"
+                    className="input"
+                  />
+                </FormField>
+                <FormField label="ODBC Driver">
+                  <input
+                    type="text"
+                    value={form.odbc_driver ?? ""}
+                    onChange={(e) => updateField("odbc_driver", e.target.value)}
+                    placeholder="ODBC Driver 18 for SQL Server"
+                    className="input"
+                  />
+                </FormField>
+              </div>
+            )}
           </>
         )}
 

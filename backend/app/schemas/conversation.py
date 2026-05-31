@@ -1,7 +1,6 @@
 """Conversation and message schemas."""
 
 from datetime import datetime
-from typing import Optional, List
 from pydantic import BaseModel
 
 
@@ -13,7 +12,7 @@ class ConversationCreate(BaseModel):
 class ConversationOut(BaseModel):
     id: int
     title: str
-    db_connection_id: Optional[int]
+    db_connection_id: int | None
     created_at: datetime
     updated_at: datetime
 
@@ -24,20 +23,20 @@ class MessageOut(BaseModel):
     id: int
     role: str
     content: str
-    generated_sql: Optional[str]
-    result_data: Optional[str]
+    generated_sql: str | None
+    result_data: str | None
     created_at: datetime
 
     model_config = {"from_attributes": True}
 
 
 class ConversationDetail(ConversationOut):
-    messages: List[MessageOut] = []
+    messages: list[MessageOut] = []
 
 
 class QueryRequest(BaseModel):
     question: str
     conversation_id: int
     db_connection_id: int
-    profile_id: Optional[int] = None   # Ollama profile to use (None = env fallback)
-    model_name: Optional[str] = None   # Model within the selected profile
+    profile_id: int | None = None   # Ollama profile to use (None = env fallback)
+    model_name: str | None = None   # Model within the selected profile

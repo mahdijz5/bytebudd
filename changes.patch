@@ -1,0 +1,1497 @@
+diff --git a/.env.example b/.env.example
+index b1a5fb9..3348427 100644
+--- a/.env.example
++++ b/.env.example
+@@ -1,24 +1,31 @@
+ # Copy this file to .env and fill in your values
+ # cp .env.example .env
+ 
++# ── App ───────────────────────────────────────────────────────────────────
++# Set to "production" in production environments
++ENVIRONMENT=development
++
+ # ── Security (CHANGE THESE IN PRODUCTION) ────────────────────────────────
+ SECRET_KEY=change-me-in-production-use-a-long-random-string-here
+ ENCRYPTION_KEY=change-me-32-char-encryption-key!
+ 
+ # ── Internal Database (ByteBudd's own Postgres) ───────────────────────────
+ DATABASE_URL=postgresql+asyncpg://bytebudd:bytebudd_secret@postgres:5432/bytebudd
++POSTGRES_PASSWORD=bytebudd_secret
+ 
+ # ── Ollama ────────────────────────────────────────────────────────────────
+-OLLAMA_BASE_URL=http://ollama:11434
++OLLAMA_BASE_URL=http://host.docker.internal:11434
+ OLLAMA_MODEL=qwen2.5-coder:8b
+ OLLAMA_TIMEOUT=120
+ 
+ # ── CORS (comma-separated list of allowed origins) ────────────────────────
++# WARNING: Do NOT use * in production — list your actual frontend origins
+ CORS_ORIGINS=http://localhost,http://localhost:3000
+ 
+ # ── Frontend ──────────────────────────────────────────────────────────────
+ NEXT_PUBLIC_API_URL=http://localhost/api
+ 
+ # ── Admin user (used by create_admin.py script) ───────────────────────────
++# WARNING: Change this password immediately after first login
+ ADMIN_EMAIL=admin@bytebudd.local
+-ADMIN_PASSWORD=admin123
++ADMIN_PASSWORD=change-me-on-first-login
+diff --git a/.gitignore b/.gitignore
+index a175f15..ecc3281 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -50,6 +50,7 @@ logs/
+ 
+ # ── IDE & editors ─────────────────────────────────────────────────────────────
+ .vscode/
++.kiro/
+ .idea/
+ *.swp
+ *.swo
+diff --git a/backend/Dockerfile b/backend/Dockerfile
+index 5a09ffc..d860b0e 100644
+--- a/backend/Dockerfile
++++ b/backend/Dockerfile
+@@ -1,14 +1,27 @@
+ # ─── Base stage ────────────────────────────────────────────────────────────
+ FROM python:3.12-slim AS base
+ 
++# Proxy build args (passed via --build-arg; empty by default)
++ARG HTTP_PROXY=""
++ARG HTTPS_PROXY=""
++ARG http_proxy=""
++ARG https_proxy=""
++
+ WORKDIR /app
+ 
+ # Install system dependencies needed to compile Python packages
++# and the Microsoft ODBC Driver 18 for SQL Server (required by pyodbc)
+ RUN apt-get update && apt-get install -y --no-install-recommends \
+     gcc \
+     libpq-dev \
+     pkg-config \
+     curl \
++    gnupg \
++    apt-transport-https \
++    && curl -sSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg \
++    && curl -sSL https://packages.microsoft.com/config/debian/12/prod.list -o /etc/apt/sources.list.d/mssql-release.list \
++    && apt-get update \
++    && ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql18 \
+     && rm -rf /var/lib/apt/lists/*
+ 
+ # Copy and install Python dependencies
+diff --git a/backend/app/api/v1/ollama_profiles.py b/backend/app/api/v1/ollama_profiles.py
+index a14a218..553d60f 100644
+--- a/backend/app/api/v1/ollama_profiles.py
++++ b/backend/app/api/v1/ollama_profiles.py
+@@ -1,9 +1,11 @@
+ """
+ Ollama Profiles API — admin CRUD + activate/deactivate + model fetching.
+-Regular users can GET /active to list profiles available for query selection.
++Regular users can GET /active to see profiles available for query selection.
+ """
+ 
+ import logging
++from datetime import datetime, timezone
++
+ from fastapi import APIRouter, Depends, HTTPException, status
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
+@@ -38,9 +40,8 @@ router = APIRouter()
+ logger = logging.getLogger(__name__)
+ 
+ 
+-# ── Helper: map service exceptions to HTTP responses ─────────────────────
+-
+ def _handle_service_error(exc: Exception) -> None:
++    """Map service-layer exceptions to appropriate HTTP responses."""
+     if isinstance(exc, ProfileNotFoundError):
+         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+     if isinstance(exc, ProfileNameConflictError):
+@@ -50,17 +51,12 @@ def _handle_service_error(exc: Exception) -> None:
+     raise exc
+ 
+ 
+-# ── Endpoints ─────────────────────────────────────────────────────────────
+-
+ @router.post("/fetch-models", response_model=FetchModelsResponse)
+ async def fetch_models(
+     payload: FetchModelsRequest,
+     _admin: User = Depends(get_admin_user),
+ ):
+-    """
+-    Probe an Ollama host URL and return its available models.
+-    Admin only.
+-    """
++    """Probe an Ollama host and return its available models. Admin only."""
+     try:
+         models = await fetch_models_from_host(payload.host_url)
+         return FetchModelsResponse(models=models)
+@@ -73,10 +69,7 @@ async def list_active_profiles(
+     db: AsyncSession = Depends(get_db),
+     _user: User = Depends(get_current_user),
+ ):
+-    """
+-    Return all active Ollama profiles.
+-    Available to all authenticated users (for the Profile_Selector).
+-    """
++    """Return all active Ollama profiles. Available to all authenticated users."""
+     profiles = await get_active_profiles(db)
+     return [OllamaProfileOut.model_validate(p) for p in profiles]
+ 
+@@ -87,26 +80,23 @@ async def list_all_profiles(
+     _admin: User = Depends(get_admin_user),
+ ):
+     """
+-    Return all Ollama profiles (admin only).
+-    Includes a synthetic read-only "Environment Default" entry (id=0)
+-    when OLLAMA_BASE_URL is configured.
++    Return all Ollama profiles. Admin only.
++    Includes a synthetic 'Environment Default' entry when OLLAMA_BASE_URL is set.
+     """
+     profiles = await list_profiles(db)
+     result = [OllamaProfileOut.model_validate(p) for p in profiles]
+ 
+-    # Prepend synthetic env-var entry if configured
+     if settings.ollama_base_url:
+-        from datetime import datetime, timezone
+-        env_entry = OllamaProfileOut(
++        now = datetime.now(timezone.utc)
++        result.append(OllamaProfileOut(
+             id=0,
+             name="Environment Default",
+-            host_url=settings.ollama_base_url or "",
++            host_url=settings.ollama_base_url,
+             models=[settings.ollama_model] if settings.ollama_model else [],
+             is_active=True,
+-            created_at=datetime.now(timezone.utc),
+-            updated_at=datetime.now(timezone.utc),
+-        )
+-        result.append(env_entry)
++            created_at=now,
++            updated_at=now,
++        ))
+ 
+     return result
+ 
+diff --git a/backend/app/api/v1/query.py b/backend/app/api/v1/query.py
+index e9eee8d..f920df8 100644
+--- a/backend/app/api/v1/query.py
++++ b/backend/app/api/v1/query.py
+@@ -1,9 +1,10 @@
+ """
+-Query endpoint - the main feature of ByteBudd.
++Query endpoint — the main feature of ByteBudd.
+ Accepts a natural language question and streams back SSE events.
+ """
+ 
+ import asyncio
++import json
+ import logging
+ from typing import AsyncIterator
+ 
+@@ -31,20 +32,17 @@ async def query_stream(
+     current_user: User = Depends(get_current_user),
+ ):
+     """
+-    Main query endpoint. Accepts a natural language question and
+-    streams back SSE (Server-Sent Events) with thinking/sql/results/done events.
+-
+-    Use EventSource on the frontend to consume.
++    Main query endpoint. Accepts a natural language question and streams
++    back SSE events: thinking / sql / results / explanation / done / error.
+     """
+-    # Validate conversation belongs to user
++    # Verify the conversation belongs to this user
+     result = await db.execute(
+         select(Conversation).where(
+             Conversation.id == payload.conversation_id,
+             Conversation.user_id == current_user.id,
+         )
+     )
+-    conv = result.scalar_one_or_none()
+-    if not conv:
++    if not result.scalar_one_or_none():
+         raise HTTPException(status_code=404, detail="Conversation not found")
+ 
+     async def event_stream() -> AsyncIterator[str]:
+@@ -62,8 +60,7 @@ async def query_stream(
+         except asyncio.CancelledError:
+             logger.info("Client disconnected during streaming")
+         except Exception as e:
+-            logger.exception(f"Stream error: {e}")
+-            import json
++            logger.exception("Stream error: %s", e)
+             yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
+ 
+     return StreamingResponse(
+@@ -78,8 +75,8 @@ async def query_stream(
+ 
+ 
+ @router.get("/ollama/status")
+-async def ollama_status(current_user: User = Depends(get_current_user)):
+-    """Check if Ollama is available and the model is loaded."""
++async def ollama_status(_user: User = Depends(get_current_user)):
++    """Check if Ollama is reachable and the model is loaded."""
+     available = await ollama_client.is_available()
+     return {
+         "available": available,
+@@ -89,18 +86,15 @@ async def ollama_status(current_user: User = Depends(get_current_user)):
+ 
+ 
+ @router.post("/ollama/pull")
+-async def pull_model(current_user: User = Depends(get_current_user)):
+-    """
+-    Pull/download the Ollama model.
+-    Streams download progress as SSE.
+-    """
++async def pull_model(_user: User = Depends(get_current_user)):
++    """Pull/download the Ollama model. Streams progress as SSE."""
+     async def pull_stream():
+         try:
+             async for status in ollama_client.pull_model():
+                 yield f"data: {status}\n\n"
+             yield "data: done\n\n"
+         except Exception as e:
+-            yield f"data: error: {e}\n\n"
++            yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
+ 
+     return StreamingResponse(
+         pull_stream(),
+diff --git a/backend/app/core/config.py b/backend/app/core/config.py
+index 4e94974..37bac56 100644
+--- a/backend/app/core/config.py
++++ b/backend/app/core/config.py
+@@ -39,7 +39,7 @@ class Settings(BaseSettings):
+ 
+     # ── Ollama ───────────────────────────────────────────────────────────
+     ollama_base_url: str = Field(
+-        default="http://192.168.1.99:11434", alias="OLLAMA_BASE_URL"
++        default="http://host.docker.internal:11434", alias="OLLAMA_BASE_URL"
+     )
+     ollama_model: str = Field(
+         default="qwen2.5-coder:8b", alias="OLLAMA_MODEL"
+diff --git a/backend/app/core/security.py b/backend/app/core/security.py
+index d724c8f..ec3ae35 100644
+--- a/backend/app/core/security.py
++++ b/backend/app/core/security.py
+@@ -3,14 +3,12 @@ Security utilities: JWT creation/verification and password hashing.
+ """
+ 
+ from datetime import datetime, timedelta, timezone
+-from typing import Optional
+ 
+ from jose import JWTError, jwt
+ from passlib.context import CryptContext
+ 
+ from app.core.config import settings
+ 
+-# Password hashing context using bcrypt
+ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+ 
+ 
+@@ -20,43 +18,29 @@ def hash_password(password: str) -> str:
+ 
+ 
+ def verify_password(plain_password: str, hashed_password: str) -> bool:
+-    """Verify a plain-text password against its hash."""
++    """Verify a plain-text password against its bcrypt hash."""
+     return pwd_context.verify(plain_password, hashed_password)
+ 
+ 
+-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
++def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
+     """
+     Create a signed JWT access token.
+-
+-    Args:
+-        data: Payload to encode (should contain 'sub' = user identifier).
+-        expires_delta: Optional custom expiry; defaults to settings value.
+-
+-    Returns:
+-        Encoded JWT string.
++    Defaults to the expiry configured in settings.
+     """
+     to_encode = data.copy()
+-    if expires_delta:
+-        expire = datetime.now(timezone.utc) + expires_delta
+-    else:
+-        expire = datetime.now(timezone.utc) + timedelta(
+-            minutes=settings.access_token_expire_minutes
+-        )
++    expire = datetime.now(timezone.utc) + (
++        expires_delta or timedelta(minutes=settings.access_token_expire_minutes)
++    )
+     to_encode["exp"] = expire
+     return jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
+ 
+ 
+-def decode_access_token(token: str) -> Optional[dict]:
++def decode_access_token(token: str) -> dict | None:
+     """
+     Decode and verify a JWT access token.
+-
+-    Returns:
+-        Decoded payload dict, or None if invalid/expired.
++    Returns the payload dict, or None if the token is invalid or expired.
+     """
+     try:
+-        payload = jwt.decode(
+-            token, settings.secret_key, algorithms=[settings.algorithm]
+-        )
+-        return payload
++        return jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+     except JWTError:
+         return None
+diff --git a/backend/app/db_connectors/__init__.py b/backend/app/db_connectors/__init__.py
+index 2aa3f1d..76f8ea0 100644
+--- a/backend/app/db_connectors/__init__.py
++++ b/backend/app/db_connectors/__init__.py
+@@ -1,5 +1,6 @@
+ """Database connector package."""
+ from app.db_connectors.connector_factory import get_connector
+ from app.db_connectors.base import BaseConnector
++from app.db_connectors.sqlserver_connector import SQLServerConnector
+ 
+-__all__ = ["get_connector", "BaseConnector"]
++__all__ = ["get_connector", "BaseConnector", "SQLServerConnector"]
+diff --git a/backend/app/db_connectors/connector_factory.py b/backend/app/db_connectors/connector_factory.py
+index 2360dde..52ba297 100644
+--- a/backend/app/db_connectors/connector_factory.py
++++ b/backend/app/db_connectors/connector_factory.py
+@@ -6,6 +6,7 @@ from app.db_connectors.base import BaseConnector
+ from app.db_connectors.postgres_connector import PostgresConnector
+ from app.db_connectors.mysql_connector import MySQLConnector
+ from app.db_connectors.sqlite_connector import SQLiteConnector
++from app.db_connectors.sqlserver_connector import SQLServerConnector
+ from app.core.encryption import decrypt_password
+ from app.models.db_connection import DBConnection
+ 
+@@ -40,4 +41,16 @@ def get_connector(conn: DBConnection) -> BaseConnector:
+     if conn.db_type == "sqlite":
+         return SQLiteConnector(sqlite_path=conn.sqlite_path or conn.database_name)
+ 
++    if conn.db_type == "mssql":
++        return SQLServerConnector(
++            host=conn.host,
++            port=conn.port or 1433,
++            database=conn.database_name,
++            username=conn.username,
++            password=password,
++            driver=conn.odbc_driver or "ODBC Driver 18 for SQL Server",
++            instance=conn.instance_name,
++            trust_server_certificate=True,
++        )
++
+     raise ValueError(f"Unsupported database type: {conn.db_type}")
+diff --git a/backend/app/llm/ollama_client.py b/backend/app/llm/ollama_client.py
+index 78eec8d..4175648 100644
+--- a/backend/app/llm/ollama_client.py
++++ b/backend/app/llm/ollama_client.py
+@@ -1,7 +1,6 @@
+ """
+ Ollama LLM client for ByteBudd.
+-Handles both streaming and non-streaming completion requests.
+-Also exposes standalone helpers for profile-aware generation.
++Handles completion requests and model management via the Ollama HTTP API.
+ """
+ 
+ import json
+@@ -20,8 +19,45 @@ class OllamaError(Exception):
+     pass
+ 
+ 
++# Shared generation options for all requests
++_GENERATION_OPTIONS = {
++    "temperature": 0.1,  # Low temperature = more deterministic SQL output
++    "top_p": 0.9,
++    "num_predict": 512,  # SQL queries are short; no need for more tokens
++}
++
++
++async def _call_ollama(host_url: str, model: str, prompt: str, timeout: int) -> str:
++    """
++    Send a prompt to an Ollama server and return the generated text.
++
++    This is the single shared implementation used by both the default client
++    and profile-aware generation. Raises OllamaError on any failure.
++    """
++    payload = {
++        "model": model,
++        "prompt": prompt,
++        "stream": False,
++        "options": _GENERATION_OPTIONS,
++    }
++    try:
++        async with httpx.AsyncClient(timeout=timeout) as client:
++            response = await client.post(
++                f"{host_url.rstrip('/')}/api/generate",
++                json=payload,
++            )
++            response.raise_for_status()
++            return response.json().get("response", "").strip()
++    except httpx.TimeoutException:
++        raise OllamaError(f"Ollama request timed out after {timeout}s")
++    except httpx.HTTPStatusError as e:
++        raise OllamaError(f"Ollama HTTP error {e.response.status_code}: {e.response.text}")
++    except Exception as e:
++        raise OllamaError(f"Ollama connection error: {e}")
++
++
+ class OllamaClient:
+-    """Thin async wrapper around the Ollama HTTP API."""
++    """Thin async wrapper around the Ollama HTTP API using env-var configuration."""
+ 
+     def __init__(self):
+         self.base_url = settings.ollama_base_url
+@@ -29,7 +65,7 @@ class OllamaClient:
+         self.timeout = settings.ollama_timeout
+ 
+     async def is_available(self) -> bool:
+-        """Check if Ollama is reachable and the model is ready."""
++        """Check if Ollama is reachable and the configured model is loaded."""
+         try:
+             async with httpx.AsyncClient(timeout=5) as client:
+                 response = await client.get(f"{self.base_url}/api/tags")
+@@ -37,56 +73,18 @@ class OllamaClient:
+                     return False
+                 data = response.json()
+                 model_names = [m["name"] for m in data.get("models", [])]
+-                # Check if any model name starts with our model (handles :latest suffix)
+-                return any(
+-                    m.startswith(self.model.split(":")[0]) for m in model_names
+-                )
++                # Match by base name to handle tags like ":latest"
++                base_name = self.model.split(":")[0]
++                return any(m.startswith(base_name) for m in model_names)
+         except Exception:
+             return False
+ 
+     async def generate(self, prompt: str) -> str:
+-        """
+-        Generate a complete (non-streaming) response from Ollama.
+-
+-        Args:
+-            prompt: The full prompt string.
+-
+-        Returns:
+-            The generated text response.
+-
+-        Raises:
+-            OllamaError: On connection failure or timeout.
+-        """
+-        payload = {
+-            "model": self.model,
+-            "prompt": prompt,
+-            "stream": False,
+-            "options": {
+-                "temperature": 0.1,   # Low temp for deterministic SQL
+-                "top_p": 0.9,
+-                "num_predict": 512,   # SQL queries are short
+-            },
+-        }
+-
+-        try:
+-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+-                response = await client.post(
+-                    f"{self.base_url}/api/generate",
+-                    json=payload,
+-                )
+-                response.raise_for_status()
+-                data = response.json()
+-                return data.get("response", "").strip()
+-
+-        except httpx.TimeoutException:
+-            raise OllamaError(f"Ollama request timed out after {self.timeout}s")
+-        except httpx.HTTPStatusError as e:
+-            raise OllamaError(f"Ollama HTTP error {e.response.status_code}: {e.response.text}")
+-        except Exception as e:
+-            raise OllamaError(f"Ollama connection error: {e}")
++        """Generate a SQL query from a prompt using the configured model."""
++        return await _call_ollama(self.base_url, self.model, prompt, self.timeout)
+ 
+     async def pull_model(self) -> AsyncIterator[str]:
+-        """Pull/download the configured model from Ollama registry."""
++        """Pull/download the configured model from the Ollama registry."""
+         payload = {"name": self.model, "stream": True}
+ 
+         async with httpx.AsyncClient(timeout=600) as client:
+@@ -105,53 +103,13 @@ class OllamaClient:
+                             continue
+ 
+ 
+-# Singleton client instance
++# Singleton used by the query pipeline when no profile is selected
+ ollama_client = OllamaClient()
+ 
+ 
+-# ── Profile-aware generation ──────────────────────────────────────────────
+-
+ async def generate_with_profile(host_url: str, model: str, prompt: str) -> str:
+     """
+-    Generate a completion using an explicit host URL and model name.
+-    Used by the query pipeline when a user has selected an Ollama profile.
+-
+-    Args:
+-        host_url: Base URL of the Ollama server.
+-        model: Model name to use.
+-        prompt: The full prompt string.
+-
+-    Returns:
+-        The generated text response.
+-
+-    Raises:
+-        OllamaError: On connection failure or timeout.
++    Generate a SQL query using an explicit Ollama host and model.
++    Used when the user has selected a named Ollama profile.
+     """
+-    payload = {
+-        "model": model,
+-        "prompt": prompt,
+-        "stream": False,
+-        "options": {
+-            "temperature": 0.1,
+-            "top_p": 0.9,
+-            "num_predict": 512,
+-        },
+-    }
+-    timeout = settings.ollama_timeout
+-    try:
+-        async with httpx.AsyncClient(timeout=timeout) as client:
+-            response = await client.post(
+-                f"{host_url.rstrip('/')}/api/generate",
+-                json=payload,
+-            )
+-            response.raise_for_status()
+-            data = response.json()
+-            return data.get("response", "").strip()
+-    except httpx.TimeoutException:
+-        raise OllamaError(f"Ollama request timed out after {timeout}s")
+-    except httpx.HTTPStatusError as e:
+-        raise OllamaError(f"Ollama HTTP error {e.response.status_code}: {e.response.text}")
+-    except OllamaError:
+-        raise
+-    except Exception as e:
+-        raise OllamaError(f"Ollama connection error: {e}")
++    return await _call_ollama(host_url, model, prompt, settings.ollama_timeout)
+diff --git a/backend/app/models/db_connection.py b/backend/app/models/db_connection.py
+index 322ce26..7739cd1 100644
+--- a/backend/app/models/db_connection.py
++++ b/backend/app/models/db_connection.py
+@@ -14,7 +14,7 @@ class DBConnection(Base):
+     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+     name: Mapped[str] = mapped_column(String(100), nullable=False)
+     db_type: Mapped[str] = mapped_column(
+-        Enum("postgresql", "mysql", "mariadb", "sqlite", name="db_type_enum"),
++        Enum("postgresql", "mysql", "mariadb", "sqlite", "mssql", name="db_type_enum"),
+         nullable=False,
+     )
+     host: Mapped[str | None] = mapped_column(String(255), nullable=True)
+@@ -25,6 +25,9 @@ class DBConnection(Base):
+     encrypted_password: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+     # For SQLite: path to the file
+     sqlite_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
++    # SQL Server-specific fields
++    instance_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
++    odbc_driver: Mapped[str | None] = mapped_column(String(255), nullable=True)
+     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+     created_at: Mapped[datetime] = mapped_column(
+         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+diff --git a/backend/app/prompts/sql_prompt.py b/backend/app/prompts/sql_prompt.py
+index 08c97e3..5828c97 100644
+--- a/backend/app/prompts/sql_prompt.py
++++ b/backend/app/prompts/sql_prompt.py
+@@ -27,11 +27,23 @@ PrestaShop schema hints:
+ - Revenue: SUM(ps_orders.total_paid) where valid=1
+ """
+ 
++TSQL_HINTS = """
++T-SQL (SQL Server) syntax hints:
++- Use TOP instead of LIMIT: SELECT TOP 1000 * FROM table
++- String concatenation uses + operator
++- Date functions: GETDATE(), DATEADD(), DATEDIFF(), FORMAT()
++- Use ISNULL() instead of COALESCE() for two-argument null checks
++- Identifiers with spaces must be wrapped in square brackets: [column name]
++- Use NVARCHAR for Unicode strings
++- Boolean values are represented as BIT (1/0)
++"""
++
+ 
+ def build_sql_prompt(
+     question: str,
+     schema: str,
+     dialect: str = "ansi",
++    current_user_id: int | None = None,
+ ) -> str:
+     """
+     Build the full prompt sent to the Ollama model.
+@@ -40,6 +52,8 @@ def build_sql_prompt(
+         question: The user's natural-language question.
+         schema: Database schema as text (from connector.get_schema()).
+         dialect: SQL dialect hint (postgresql, mysql, sqlite, etc.).
++        current_user_id: The ID of the logged-in user, injected so the LLM
++                         can resolve references like "my records" or "من".
+ 
+     Returns:
+         Formatted prompt string.
+@@ -52,6 +66,16 @@ def build_sql_prompt(
+     elif "ps_orders" in schema_lower or "ps_customer" in schema_lower:
+         platform_hints = PRESTASHOP_HINTS
+ 
++    # Inject T-SQL dialect hints for SQL Server connections
++    dialect_hints = ""
++    if dialect == "tsql":
++        dialect_hints = TSQL_HINTS
++
++    # Inject current user context if available
++    user_context = ""
++    if current_user_id is not None:
++        user_context = f"\n## Current User:\nThe logged-in user's ID is: {current_user_id}\nUse this value directly when the question refers to 'me', 'my', 'من', 'مال من', etc.\n"
++
+     prompt = f"""You are ByteBudd, an expert SQL assistant. Your job is to convert natural language questions into safe, read-only SQL queries.
+ 
+ ## Rules (CRITICAL - follow exactly):
+@@ -61,12 +85,12 @@ def build_sql_prompt(
+ 4. Use proper {dialect.upper()} syntax
+ 5. Return ONLY the SQL query — no explanations, no markdown, no code fences
+ 6. If the question cannot be answered with the available schema, respond with: ERROR: <reason>
++7. NEVER use placeholders like <value> or <YourUserID> — always use real values from the context provided
+ 
+ ## Database Schema:
+ {schema}
+-
+-{platform_hints}
+-
++{user_context}
++{platform_hints}{dialect_hints}
+ ## User Question:
+ {question}
+ 
+diff --git a/backend/app/schemas/conversation.py b/backend/app/schemas/conversation.py
+index 39185aa..fc521b5 100644
+--- a/backend/app/schemas/conversation.py
++++ b/backend/app/schemas/conversation.py
+@@ -1,7 +1,6 @@
+ """Conversation and message schemas."""
+ 
+ from datetime import datetime
+-from typing import Optional, List
+ from pydantic import BaseModel
+ 
+ 
+@@ -13,7 +12,7 @@ class ConversationCreate(BaseModel):
+ class ConversationOut(BaseModel):
+     id: int
+     title: str
+-    db_connection_id: Optional[int]
++    db_connection_id: int | None
+     created_at: datetime
+     updated_at: datetime
+ 
+@@ -24,20 +23,20 @@ class MessageOut(BaseModel):
+     id: int
+     role: str
+     content: str
+-    generated_sql: Optional[str]
+-    result_data: Optional[str]
++    generated_sql: str | None
++    result_data: str | None
+     created_at: datetime
+ 
+     model_config = {"from_attributes": True}
+ 
+ 
+ class ConversationDetail(ConversationOut):
+-    messages: List[MessageOut] = []
++    messages: list[MessageOut] = []
+ 
+ 
+ class QueryRequest(BaseModel):
+     question: str
+     conversation_id: int
+     db_connection_id: int
+-    profile_id: Optional[int] = None   # Ollama profile to use (None = env fallback)
+-    model_name: Optional[str] = None   # Model within the selected profile
++    profile_id: int | None = None   # Ollama profile to use (None = env fallback)
++    model_name: str | None = None   # Model within the selected profile
+diff --git a/backend/app/schemas/db_connection.py b/backend/app/schemas/db_connection.py
+index 5fd2ab1..09e1ae2 100644
+--- a/backend/app/schemas/db_connection.py
++++ b/backend/app/schemas/db_connection.py
+@@ -1,42 +1,46 @@
+ """Database connection Pydantic schemas."""
+ 
+-from typing import Optional, Literal
++from typing import Literal
+ from pydantic import BaseModel, Field
+ 
+ 
+-DBType = Literal["postgresql", "mysql", "mariadb", "sqlite"]
++DBType = Literal["postgresql", "mysql", "mariadb", "sqlite", "mssql"]
+ 
+ 
+ class DBConnectionCreate(BaseModel):
+     name: str = Field(..., min_length=1, max_length=100)
+     db_type: DBType
+-    host: Optional[str] = None
+-    port: Optional[int] = None
++    host: str | None = None
++    port: int | None = None
+     database_name: str
+-    username: Optional[str] = None
+-    password: Optional[str] = None  # plain-text, encrypted before storage
+-    sqlite_path: Optional[str] = None
++    username: str | None = None
++    password: str | None = None  # plain-text, encrypted before storage
++    sqlite_path: str | None = None
++    instance_name: str | None = None  # SQL Server named instance
++    odbc_driver: str | None = None    # ODBC driver override
+ 
+ 
+ class DBConnectionUpdate(BaseModel):
+-    name: Optional[str] = None
+-    host: Optional[str] = None
+-    port: Optional[int] = None
+-    database_name: Optional[str] = None
+-    username: Optional[str] = None
+-    password: Optional[str] = None
+-    sqlite_path: Optional[str] = None
++    name: str | None = None
++    host: str | None = None
++    port: int | None = None
++    database_name: str | None = None
++    username: str | None = None
++    password: str | None = None
++    sqlite_path: str | None = None
+ 
+ 
+ class DBConnectionOut(BaseModel):
+     id: int
+     name: str
+     db_type: str
+-    host: Optional[str]
+-    port: Optional[int]
++    host: str | None
++    port: int | None
+     database_name: str
+-    username: Optional[str]
++    username: str | None
+     is_active: bool
++    instance_name: str | None
++    odbc_driver: str | None
+ 
+     model_config = {"from_attributes": True}
+ 
+@@ -44,4 +48,4 @@ class DBConnectionOut(BaseModel):
+ class ConnectionTestResult(BaseModel):
+     success: bool
+     message: str
+-    tables_found: Optional[int] = None
++    tables_found: int | None = None
+diff --git a/backend/app/services/query_pipeline.py b/backend/app/services/query_pipeline.py
+index b15d41b..4c9aed4 100644
+--- a/backend/app/services/query_pipeline.py
++++ b/backend/app/services/query_pipeline.py
+@@ -1,8 +1,7 @@
+ """
+ Core query pipeline: question → schema → LLM → validate → execute → stream.
+ 
+-This is the heart of ByteBudd. Each step is clearly separated for readability.
+-SSE events are yielded as formatted strings.
++Each step yields SSE events so the frontend can show live progress.
+ """
+ 
+ import json
+@@ -25,8 +24,17 @@ from app.services.ollama_profile_service import resolve_ollama_config
+ 
+ logger = logging.getLogger(__name__)
+ 
++# Maps db_type values to sqlglot dialect names
++_DIALECT_MAP = {
++    "postgresql": "postgresql",
++    "mysql": "mysql",
++    "mariadb": "mysql",
++    "sqlite": "sqlite",
++    "mssql": "tsql",
++}
+ 
+-def _sse_event(event: str, data: dict) -> str:
++
++def _sse(event: str, data: dict) -> str:
+     """Format a Server-Sent Event string."""
+     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+ 
+@@ -41,14 +49,14 @@ async def run_query_pipeline(
+     model_name: str | None = None,
+ ) -> AsyncIterator[str]:
+     """
+-    Full query pipeline with SSE streaming output.
+-
+-    Yields SSE-formatted strings for each pipeline stage:
+-      - thinking: LLM is generating
+-      - sql: the validated SQL
+-      - results: query results
+-      - explanation: summary
+-      - done: pipeline complete
++    Run the full query pipeline and yield SSE events.
++
++    Events yielded:
++      - thinking: progress updates while working
++      - sql: the validated SQL query
++      - results: query results (columns + rows)
++      - explanation: plain-language summary
++      - done: pipeline finished successfully
+       - error: something went wrong
+     """
+     start_time = time.monotonic()
+@@ -58,106 +66,98 @@ async def run_query_pipeline(
+     error_msg: str | None = None
+ 
+     try:
+-        # ── Step 1: Load DB connection ────────────────────────────────────
++        # Step 1: Load the database connection record
+         result = await db.execute(
+-            select(DBConnection).where(DBConnection.id == db_connection_id)
++            select(DBConnection).where(
++                DBConnection.id == db_connection_id,
++                DBConnection.user_id == user_id,  # Ensure the user owns this connection
++            )
+         )
+         db_conn = result.scalar_one_or_none()
+-
+         if not db_conn:
+-            yield _sse_event("error", {"message": "Database connection not found"})
++            yield _sse("error", {"message": "Database connection not found"})
+             return
+ 
+         connector = get_connector(db_conn)
++        dialect = _DIALECT_MAP.get(db_conn.db_type, "ansi")
+ 
+-        # ── Step 2: Fetch schema ──────────────────────────────────────────
+-        yield _sse_event("thinking", {"message": "Reading database schema..."})
+-
++        # Step 2: Fetch the database schema
++        yield _sse("thinking", {"message": "Reading database schema..."})
+         try:
+             schema = await connector.get_schema()
+         except Exception as e:
+-            logger.error(f"Schema fetch error: {e}")
+-            yield _sse_event("error", {"message": f"Failed to read schema: {e}"})
++            logger.error("Schema fetch failed: %s", e)
++            yield _sse("error", {"message": f"Failed to read schema: {e}"})
+             return
+ 
+         if not schema.strip():
+-            yield _sse_event("error", {"message": "Database schema is empty or unreadable"})
++            yield _sse("error", {"message": "Database schema is empty or unreadable"})
+             return
+ 
+-        # ── Step 3: Build prompt ──────────────────────────────────────────
+-        yield _sse_event("thinking", {"message": "Analyzing your question..."})
+-
+-        dialect_map = {
+-            "postgresql": "postgresql",
+-            "mysql": "mysql",
+-            "mariadb": "mysql",
+-            "sqlite": "sqlite",
+-        }
+-        dialect = dialect_map.get(db_conn.db_type, "ansi")
+-        prompt = build_sql_prompt(question=question, schema=schema, dialect=dialect)
++        logger.debug("Schema fetched: %d chars", len(schema))
+ 
+-        # ── Step 4: Call Ollama ───────────────────────────────────────────
+-        yield _sse_event("thinking", {"message": "Generating SQL with AI..."})
++        # Step 3: Build the LLM prompt
++        yield _sse("thinking", {"message": "Analyzing your question..."})
++        prompt = build_sql_prompt(
++            question=question,
++            schema=schema,
++            dialect=dialect,
++            current_user_id=user_id,
++        )
+ 
++        # Step 4: Call the LLM
++        yield _sse("thinking", {"message": "Generating SQL with AI..."})
+         try:
+             if profile_id is not None and model_name is not None:
+-                # Profile-aware path: resolve host + model from DB
+-                host_url, resolved_model = await resolve_ollama_config(
+-                    db, profile_id, model_name
+-                )
++                host_url, resolved_model = await resolve_ollama_config(db, profile_id, model_name)
+                 raw_sql = await generate_with_profile(host_url, resolved_model, prompt)
+             else:
+-                # Legacy env-var path
+                 raw_sql = await ollama_client.generate(prompt)
+         except OllamaError as e:
+-            logger.error(f"Ollama error: {e}")
+-            yield _sse_event("error", {"message": f"AI model error: {e}"})
++            logger.error("LLM error: %s", e)
++            yield _sse("error", {"message": f"AI model error: {e}"})
+             return
+ 
+-        # Check for LLM-reported errors
+         if raw_sql.upper().startswith("ERROR:"):
+-            yield _sse_event("error", {"message": raw_sql})
++            yield _sse("error", {"message": raw_sql})
+             return
+ 
+-        # ── Step 5: Validate SQL ──────────────────────────────────────────
++        # Step 5: Validate and sanitize the SQL
++        logger.debug("LLM raw output: %r", raw_sql)
+         try:
+             safe_sql = validate_sql(raw_sql, dialect=dialect)
++            logger.debug("SQL after validation (dialect=%s): %s", dialect, safe_sql)
+         except SQLGuardError as e:
+-            yield _sse_event("error", {"message": f"SQL validation failed: {e}"})
++            logger.warning("SQL validation failed. Raw: %r | Error: %s", raw_sql, e)
++            yield _sse("error", {"message": f"SQL validation failed: {e}"})
+             success = False
+             error_msg = str(e)
+             return
+ 
+         generated_sql = safe_sql
+-        yield _sse_event("sql", {"sql": safe_sql})
+-
+-        # ── Step 6: Execute query ─────────────────────────────────────────
+-        yield _sse_event("thinking", {"message": "Executing query..."})
++        yield _sse("sql", {"sql": safe_sql})
+ 
++        # Step 6: Execute the query
++        yield _sse("thinking", {"message": "Executing query..."})
+         try:
+             rows = await connector.execute_query(safe_sql)
+             row_count = len(rows)
+         except Exception as e:
+-            logger.error(f"Query execution error: {e}")
+-            yield _sse_event("error", {"message": f"Query execution failed: {e}"})
++            logger.error("Query execution failed: %s", e)
++            yield _sse("error", {"message": f"Query execution failed: {e}"})
+             success = False
+             error_msg = str(e)
+             return
+ 
+-        # ── Step 7: Stream results ────────────────────────────────────────
+-        # Send results in chunks to avoid massive single payloads
++        # Step 7: Send results
+         columns = list(rows[0].keys()) if rows else []
+-        yield _sse_event("results", {
+-            "columns": columns,
+-            "rows": rows,
+-            "row_count": row_count,
+-        })
++        yield _sse("results", {"columns": columns, "rows": rows, "row_count": row_count})
+ 
+-        # ── Step 8: Explanation ───────────────────────────────────────────
+-        explanation = _build_explanation(question, safe_sql, row_count)
+-        yield _sse_event("explanation", {"text": explanation})
++        # Step 8: Send plain-language explanation
++        explanation = _build_explanation(row_count)
++        yield _sse("explanation", {"text": explanation})
+ 
+-        # ── Step 9: Save messages to DB ───────────────────────────────────
++        # Step 9: Persist messages to conversation history
+         await _save_messages(
+             db=db,
+             conversation_id=conversation_id,
+@@ -169,16 +169,16 @@ async def run_query_pipeline(
+             row_count=row_count,
+         )
+ 
+-        yield _sse_event("done", {"message": "Query complete"})
++        yield _sse("done", {"message": "Query complete"})
+ 
+     except Exception as e:
+-        logger.exception(f"Unexpected pipeline error: {e}")
++        logger.exception("Unexpected pipeline error: %s", e)
+         success = False
+         error_msg = str(e)
+-        yield _sse_event("error", {"message": f"Internal error: {e}"})
++        yield _sse("error", {"message": f"Internal error: {e}"})
+ 
+     finally:
+-        # ── Audit log ─────────────────────────────────────────────────────
++        # Always write an audit log entry, even on failure
+         elapsed_ms = (time.monotonic() - start_time) * 1000
+         audit = AuditLog(
+             user_id=user_id,
+@@ -194,17 +194,16 @@ async def run_query_pipeline(
+         try:
+             await db.commit()
+         except Exception as e:
+-            logger.error(f"Failed to save audit log: {e}")
++            logger.error("Failed to save audit log: %s", e)
+ 
+ 
+-def _build_explanation(question: str, sql: str, row_count: int) -> str:
+-    """Build a simple human-readable explanation of what was executed."""
++def _build_explanation(row_count: int) -> str:
++    """Return a plain-language summary of the query result."""
+     if row_count == 0:
+-        return f"The query ran successfully but returned no results. This might mean the data doesn't exist or your filters are too specific."
+-    elif row_count == 1000:
+-        return f"Found 1,000 rows (limit reached). Consider adding more specific filters to narrow down the results."
+-    else:
+-        return f"Found {row_count} row{'s' if row_count != 1 else ''} matching your question."
++        return "The query ran successfully but returned no results. Your filters may be too specific."
++    if row_count >= 1000:
++        return "Found 1,000 rows (limit reached). Add more specific filters to narrow down the results."
++    return f"Found {row_count} row{'s' if row_count != 1 else ''}."
+ 
+ 
+ async def _save_messages(
+@@ -217,30 +216,22 @@ async def _save_messages(
+     columns: list,
+     row_count: int,
+ ) -> None:
+-    """Save the user question and assistant response to the conversation."""
+-    # User message
+-    user_msg = Message(
+-        conversation_id=conversation_id,
+-        role="user",
+-        content=question,
+-    )
+-    db.add(user_msg)
++    """Save the user question and assistant response to conversation history."""
++    db.add(Message(conversation_id=conversation_id, role="user", content=question))
+ 
+-    # Serialise results so history can re-render the table (cap at 200 rows to keep it lean)
++    # Cap stored rows at 200 to keep the payload lean
+     result_payload = json.dumps({
+         "columns": columns,
+         "rows": rows[:200],
+         "row_count": row_count,
+     })
+ 
+-    # Assistant response
+-    assistant_msg = Message(
++    db.add(Message(
+         conversation_id=conversation_id,
+         role="assistant",
+         content=answer,
+         generated_sql=sql,
+         result_data=result_payload,
+-    )
+-    db.add(assistant_msg)
++    ))
+ 
+     await db.flush()
+diff --git a/backend/app/services/sql_guard.py b/backend/app/services/sql_guard.py
+index b1deff7..de6c4cb 100644
+--- a/backend/app/services/sql_guard.py
++++ b/backend/app/services/sql_guard.py
+@@ -41,7 +41,13 @@ def validate_sql(sql: str, dialect: str = "ansi") -> str:
+     1. Strip and clean the input
+     2. Check for blocked keywords via regex (fast path)
+     3. Parse with sqlglot to verify statement type
+-    4. Ensure a LIMIT clause is present (add if missing)
++    4. Ensure a LIMIT/TOP clause is present (add if missing)
++
++    Args:
++        sql: The SQL string to validate.
++        dialect: The SQL dialect to use for parsing and output.
++                 Use ``"tsql"`` for SQL Server, or ``"ansi"`` (default) for
++                 standard SQL. T-SQL output will use TOP N syntax.
+ 
+     Returns:
+         Cleaned, safe SQL string ready for execution.
+@@ -52,22 +58,33 @@ def validate_sql(sql: str, dialect: str = "ansi") -> str:
+     if not sql or not sql.strip():
+         raise SQLGuardError("Empty SQL query")
+ 
+-    # Step 1: Clean up - remove markdown code fences LLMs sometimes add
++    # Step 1: Clean up - strip ANSI escape codes and markdown fences LLMs emit
+     sql = _strip_markdown(sql)
+ 
+-    # Step 2: Fast keyword check (case-insensitive on uppercased SQL)
++    # Step 1b: Detect LLM placeholders like <YourUserID> or <value>
++    # These mean the LLM couldn't determine a value and needs more context.
++    placeholder = re.search(r"<[^>]+>", sql)
++    if placeholder:
++        raise SQLGuardError(
++            f"The query contains a placeholder '{placeholder.group()}' — "
++            "please provide more specific information (e.g. your user ID or name) so the query can be completed."
++        )
++
++    # Step 2: Fast keyword check (case-insensitive)
+     upper_sql = sql.upper()
+     for keyword in BLOCKED_KEYWORDS:
+-        # Use word boundary to avoid false positives (e.g. "select" vs "selecting")
+         pattern = r"\b" + keyword + r"\b"
+         if re.search(pattern, upper_sql):
+             raise SQLGuardError(
+                 f"Operation '{keyword}' is not allowed. ByteBudd runs read-only queries only."
+             )
+ 
+-    # Step 3: Parse with sqlglot
++    # Step 3: Parse with sqlglot using the correct dialect.
++    # sqlglot v26+ normalises T-SQL TOP N into a Limit node internally,
++    # so we always work with Limit nodes regardless of dialect.
++    parse_dialect = dialect if dialect != "ansi" else None
+     try:
+-        statements = sqlglot.parse(sql)
++        statements = sqlglot.parse(sql, dialect=parse_dialect)
+     except sqlglot.errors.ParseError as e:
+         raise SQLGuardError(f"SQL parse error: {e}")
+ 
+@@ -86,41 +103,46 @@ def validate_sql(sql: str, dialect: str = "ansi") -> str:
+             f"Statement type '{stmt_type}' is not allowed. Only SELECT queries are permitted."
+         )
+ 
+-    # Step 5: Ensure LIMIT clause exists
+-    sql_with_limit = _ensure_limit(statement, sql)
+-
+-    return sql_with_limit
++    # Step 5: Enforce row cap and return SQL in the correct dialect
++    return _ensure_limit(statement, dialect=dialect)
+ 
+ 
+ def _strip_markdown(sql: str) -> str:
+-    """Remove markdown code fences that LLMs sometimes wrap SQL in."""
++    """Remove ANSI escape codes and markdown fences that LLMs sometimes emit."""
++    # Remove ANSI escape sequences: full form \x1b[...m and orphaned bracket form [...m
++    sql = re.sub(r"\x1b\[[0-9;]*m", "", sql)
++    sql = re.sub(r"\[[0-9;]*m", "", sql)
+     # Remove ```sql ... ``` blocks
+     sql = re.sub(r"```(?:sql)?\s*\n?", "", sql, flags=re.IGNORECASE)
+     sql = re.sub(r"```\s*$", "", sql, flags=re.MULTILINE)
+     return sql.strip().rstrip(";").strip()
+ 
+ 
+-def _ensure_limit(statement: exp.Expression, original_sql: str) -> str:
++def _ensure_limit(statement: exp.Expression, dialect: str = "ansi") -> str:
+     """
+-    Ensure the query has a LIMIT clause.
+-    If missing, add LIMIT 1000.
+-    If present but > 1000, cap at 1000.
++    Ensure the query has a row cap, then regenerate SQL in the target dialect.
++
++    sqlglot v26+ represents both LIMIT N and TOP N as a Limit node internally.
++    Regenerating with dialect="tsql" produces TOP N; anything else produces LIMIT N.
++
++    - No Limit node: inject LIMIT 1000 (becomes TOP 1000 for tsql output).
++    - Limit <= 1000: leave as-is.
++    - Limit > 1000: cap at 1000.
+     """
+-    # Find any existing LIMIT
++    out_dialect = dialect if dialect != "ansi" else None
++
+     limit_node = statement.find(exp.Limit)
+ 
+     if limit_node is None:
+-        # No LIMIT: append one
+-        return f"{original_sql} LIMIT {DEFAULT_LIMIT}"
+-
+-    # Has a LIMIT: check if it exceeds our cap
+-    try:
+-        limit_val = int(limit_node.this.this)
+-        if limit_val > DEFAULT_LIMIT:
+-            # Replace the limit value
+-            limit_node.set("this", exp.Literal.number(DEFAULT_LIMIT))
+-            return statement.sql()
+-    except (AttributeError, ValueError):
+-        pass  # Can't parse limit value, leave as-is
+-
+-    return original_sql
++        # No row cap — add one
++        statement.set("limit", exp.Limit(expression=exp.Literal.number(DEFAULT_LIMIT)))
++    else:
++        # Row cap exists — enforce ceiling
++        try:
++            limit_val = int(limit_node.expression.this)
++            if limit_val > DEFAULT_LIMIT:
++                limit_node.set("expression", exp.Literal.number(DEFAULT_LIMIT))
++        except (AttributeError, ValueError):
++            pass  # Can't parse the value — leave as-is
++
++    return statement.sql(dialect=out_dialect)
+diff --git a/backend/requirements.txt b/backend/requirements.txt
+index df53ca4..0c03faa 100644
+--- a/backend/requirements.txt
++++ b/backend/requirements.txt
+@@ -12,8 +12,6 @@ aiosqlite==0.20.0
+ # Authentication
+ python-jose[cryptography]==3.3.0
+ passlib[bcrypt]==1.7.4
+-bcrypt==4.0.1
+-python-multipart==0.0.18
+ 
+ # Validation
+ pydantic==2.10.3
+@@ -23,6 +21,9 @@ email-validator==2.2.0
+ # SQL parsing and validation
+ sqlglot==26.0.1
+ 
++# SQL Server connectivity
++pyodbc==5.2.0
++
+ # HTTP client (for Ollama)
+ httpx==0.28.1
+ 
+diff --git a/docker-compose.yml b/docker-compose.yml
+index 1362d9d..088ccd1 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -1,5 +1,5 @@
+ services:
+-  # ─── Nginx reverse proxy ───────────────────────────────────────────────────
++  # ── Nginx reverse proxy ───────────────────────────────────────────────────
+   nginx:
+     image: nginx:1.25-alpine
+     container_name: bytebudd-nginx
+@@ -14,14 +14,21 @@ services:
+     networks:
+       - bytebudd-net
+ 
+-  # ─── FastAPI backend ──────────────────────────────────────────────────────
++  # ── FastAPI backend ───────────────────────────────────────────────────────
+   backend:
+     build:
+       context: ./backend
+       dockerfile: Dockerfile
++      # Pass proxy settings at build time if needed.
++      # Set these in your shell environment before running docker compose up.
++      args:
++        HTTP_PROXY: ${HTTP_PROXY:-}
++        HTTPS_PROXY: ${HTTPS_PROXY:-}
++        http_proxy: ${http_proxy:-}
++        https_proxy: ${https_proxy:-}
+     container_name: bytebudd-backend
+     environment:
+-      - DATABASE_URL=postgresql+asyncpg://bytebudd:bytebudd_secret@postgres:5432/bytebudd
++      - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://bytebudd:bytebudd_secret@postgres:5432/bytebudd}
+       - SECRET_KEY=${SECRET_KEY:-change-me-in-production-use-strong-secret}
+       - ALGORITHM=HS256
+       - ACCESS_TOKEN_EXPIRE_MINUTES=60
+@@ -29,7 +36,7 @@ services:
+       - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen3:14b}
+       - OLLAMA_TIMEOUT=120
+       - ENCRYPTION_KEY=${ENCRYPTION_KEY:-change-me-32-char-encryption-key!}
+-      - CORS_ORIGINS=${CORS_ORIGINS:-*}
++      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost,http://localhost:3000}
+       - ENVIRONMENT=development
+     depends_on:
+       postgres:
+@@ -40,7 +47,7 @@ services:
+     networks:
+       - bytebudd-net
+ 
+-  # ─── Next.js frontend ────────────────────────────────────────────────────
++  # ── Next.js frontend ──────────────────────────────────────────────────────
+   frontend:
+     build:
+       context: ./frontend
+@@ -58,14 +65,14 @@ services:
+     networks:
+       - bytebudd-net
+ 
+-  # ─── PostgreSQL (ByteBudd internal DB) ───────────────────────────────────
++  # ── PostgreSQL (ByteBudd internal DB) ─────────────────────────────────────
+   postgres:
+     image: postgres:16-alpine
+     container_name: bytebudd-postgres
+     environment:
+       - POSTGRES_DB=bytebudd
+       - POSTGRES_USER=bytebudd
+-      - POSTGRES_PASSWORD=bytebudd_secret
++      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-bytebudd_secret}
+     volumes:
+       - ./data/postgres:/var/lib/postgresql/data
+     healthcheck:
+@@ -77,17 +84,17 @@ services:
+     networks:
+       - bytebudd-net
+ 
+-  # ─── MySQL (sample target DB for chatbot testing) ────────────────────────
++  # ── MySQL (sample target DB for testing) ──────────────────────────────────
+   mysql:
+     image: mysql:8.0
+     container_name: bytebudd-mysql
+     ports:
+-      - "3307:3306"          # exposed on 3307 to avoid clashing with a local MySQL
++      - "3307:3306"
+     environment:
+-      - MYSQL_ROOT_PASSWORD=root_secret
++      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-root_secret}
+       - MYSQL_DATABASE=sample_db
+       - MYSQL_USER=sample_user
+-      - MYSQL_PASSWORD=sample_password
++      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-sample_password}
+     volumes:
+       - ./data/mysql:/var/lib/mysql
+       - ./infrastructure/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+diff --git a/frontend/src/app/databases/page.tsx b/frontend/src/app/databases/page.tsx
+index 757b15f..9b8a61a 100644
+--- a/frontend/src/app/databases/page.tsx
++++ b/frontend/src/app/databases/page.tsx
+@@ -27,6 +27,8 @@ interface DBConnectionUpdate {
+   username?: string;
+   password?: string;
+   sqlite_path?: string;
++  instance_name?: string;
++  odbc_driver?: string;
+ }
+ 
+ export default function DatabasesPage() {
+@@ -330,6 +332,7 @@ function AddConnectionForm({
+   }
+ 
+   const isSqlite = form.db_type === "sqlite";
++  const isMssql = form.db_type === "mssql";
+ 
+   return (
+     <div className="bg-white border border-gray-200 rounded-2xl p-6 shadow-sm mb-4">
+@@ -356,7 +359,13 @@ function AddConnectionForm({
+               onChange={(e) => {
+                 const t = e.target.value as DBConnectionCreate["db_type"];
+                 updateField("db_type", t);
+-                updateField("port", t === "mysql" || t === "mariadb" ? 3306 : t === "postgresql" ? 5432 : undefined);
++                updateField(
++                  "port",
++                  t === "mysql" || t === "mariadb" ? 3306
++                  : t === "postgresql" ? 5432
++                  : t === "mssql" ? 1433
++                  : undefined
++                );
+               }}
+               className="input"
+             >
+@@ -364,6 +373,7 @@ function AddConnectionForm({
+               <option value="mysql">MySQL</option>
+               <option value="mariadb">MariaDB</option>
+               <option value="sqlite">SQLite</option>
++              <option value="mssql">SQL Server (MSSQL)</option>
+             </select>
+           </FormField>
+         </div>
+@@ -435,6 +445,29 @@ function AddConnectionForm({
+                 />
+               </FormField>
+             </div>
++
++            {isMssql && (
++              <div className="grid grid-cols-2 gap-4">
++                <FormField label="Instance Name">
++                  <input
++                    type="text"
++                    value={form.instance_name || ""}
++                    onChange={(e) => updateField("instance_name", e.target.value)}
++                    placeholder="SQLEXPRESS (leave blank for default)"
++                    className="input"
++                  />
++                </FormField>
++                <FormField label="ODBC Driver">
++                  <input
++                    type="text"
++                    value={form.odbc_driver || ""}
++                    onChange={(e) => updateField("odbc_driver", e.target.value)}
++                    placeholder="ODBC Driver 18 for SQL Server"
++                    className="input"
++                  />
++                </FormField>
++              </div>
++            )}
+           </>
+         )}
+ 
+@@ -476,6 +509,7 @@ function EditConnectionForm({
+   onCancel: () => void;
+ }) {
+   const isSqlite = db.db_type === "sqlite";
++  const isMssql = db.db_type === "mssql";
+ 
+   const [form, setForm] = useState<DBConnectionUpdate>({
+     name: db.name,
+@@ -485,6 +519,8 @@ function EditConnectionForm({
+     username: db.username ?? "",
+     password: "",
+     sqlite_path: db.database_name, // sqlite stores path in database_name
++    instance_name: db.instance_name ?? "",
++    odbc_driver: db.odbc_driver ?? "",
+   });
+   const [saving, setSaving] = useState(false);
+   const [error, setError] = useState("");
+@@ -597,6 +633,29 @@ function EditConnectionForm({
+                 />
+               </FormField>
+             </div>
++
++            {isMssql && (
++              <div className="grid grid-cols-2 gap-4">
++                <FormField label="Instance Name">
++                  <input
++                    type="text"
++                    value={form.instance_name ?? ""}
++                    onChange={(e) => updateField("instance_name", e.target.value)}
++                    placeholder="SQLEXPRESS (leave blank for default)"
++                    className="input"
++                  />
++                </FormField>
++                <FormField label="ODBC Driver">
++                  <input
++                    type="text"
++                    value={form.odbc_driver ?? ""}
++                    onChange={(e) => updateField("odbc_driver", e.target.value)}
++                    placeholder="ODBC Driver 18 for SQL Server"
++                    className="input"
++                  />
++                </FormField>
++              </div>
++            )}
+           </>
+         )}
+ 
+diff --git a/frontend/src/lib/utils.ts b/frontend/src/lib/utils.ts
+index d02be65..a81a4ac 100644
+--- a/frontend/src/lib/utils.ts
++++ b/frontend/src/lib/utils.ts
+@@ -11,6 +11,7 @@ export function dbTypeLabel(dbType: string): string {
+     mysql: "MySQL",
+     mariadb: "MariaDB",
+     sqlite: "SQLite",
++    mssql: "SQL Server",
+   };
+   return labels[dbType] || dbType;
+ }
+@@ -21,6 +22,7 @@ export function dbTypeColor(dbType: string): string {
+     mysql: "bg-orange-100 text-orange-800",
+     mariadb: "bg-amber-100 text-amber-800",
+     sqlite: "bg-gray-100 text-gray-800",
++    mssql: "bg-red-100 text-red-800",
+   };
+   return colors[dbType] || "bg-gray-100 text-gray-800";
+ }
+diff --git a/frontend/src/types/index.ts b/frontend/src/types/index.ts
+index 9e88401..956f346 100644
+--- a/frontend/src/types/index.ts
++++ b/frontend/src/types/index.ts
+@@ -12,23 +12,27 @@ export interface User {
+ export interface DBConnection {
+   id: number;
+   name: string;
+-  db_type: "postgresql" | "mysql" | "mariadb" | "sqlite";
++  db_type: "postgresql" | "mysql" | "mariadb" | "sqlite" | "mssql";
+   host: string | null;
+   port: number | null;
+   database_name: string;
+   username: string | null;
+   is_active: boolean;
++  instance_name?: string | null;
++  odbc_driver?: string | null;
+ }
+ 
+ export interface DBConnectionCreate {
+   name: string;
+-  db_type: "postgresql" | "mysql" | "mariadb" | "sqlite";
++  db_type: "postgresql" | "mysql" | "mariadb" | "sqlite" | "mssql";
+   host?: string;
+   port?: number;
+   database_name: string;
+   username?: string;
+   password?: string;
+   sqlite_path?: string;
++  instance_name?: string;
++  odbc_driver?: string;
+ }
+ 
+ export interface Conversation {

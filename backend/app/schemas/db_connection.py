@@ -1,42 +1,46 @@
 """Database connection Pydantic schemas."""
 
-from typing import Optional, Literal
+from typing import Literal
 from pydantic import BaseModel, Field
 
 
-DBType = Literal["postgresql", "mysql", "mariadb", "sqlite"]
+DBType = Literal["postgresql", "mysql", "mariadb", "sqlite", "mssql"]
 
 
 class DBConnectionCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     db_type: DBType
-    host: Optional[str] = None
-    port: Optional[int] = None
+    host: str | None = None
+    port: int | None = None
     database_name: str
-    username: Optional[str] = None
-    password: Optional[str] = None  # plain-text, encrypted before storage
-    sqlite_path: Optional[str] = None
+    username: str | None = None
+    password: str | None = None  # plain-text, encrypted before storage
+    sqlite_path: str | None = None
+    instance_name: str | None = None  # SQL Server named instance
+    odbc_driver: str | None = None    # ODBC driver override
 
 
 class DBConnectionUpdate(BaseModel):
-    name: Optional[str] = None
-    host: Optional[str] = None
-    port: Optional[int] = None
-    database_name: Optional[str] = None
-    username: Optional[str] = None
-    password: Optional[str] = None
-    sqlite_path: Optional[str] = None
+    name: str | None = None
+    host: str | None = None
+    port: int | None = None
+    database_name: str | None = None
+    username: str | None = None
+    password: str | None = None
+    sqlite_path: str | None = None
 
 
 class DBConnectionOut(BaseModel):
     id: int
     name: str
     db_type: str
-    host: Optional[str]
-    port: Optional[int]
+    host: str | None
+    port: int | None
     database_name: str
-    username: Optional[str]
+    username: str | None
     is_active: bool
+    instance_name: str | None
+    odbc_driver: str | None
 
     model_config = {"from_attributes": True}
 
@@ -44,4 +48,4 @@ class DBConnectionOut(BaseModel):
 class ConnectionTestResult(BaseModel):
     success: bool
     message: str
-    tables_found: Optional[int] = None
+    tables_found: int | None = None

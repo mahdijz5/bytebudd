@@ -27,11 +27,23 @@ PrestaShop schema hints:
 - Revenue: SUM(ps_orders.total_paid) where valid=1
 """
 
+TSQL_HINTS = """
+T-SQL (SQL Server) syntax hints:
+- Use TOP instead of LIMIT: SELECT TOP 1000 * FROM table
+- String concatenation uses + operator
+- Date functions: GETDATE(), DATEADD(), DATEDIFF(), FORMAT()
+- Use ISNULL() instead of COALESCE() for two-argument null checks
+- Identifiers with spaces must be wrapped in square brackets: [column name]
+- Use NVARCHAR for Unicode strings
+- Boolean values are represented as BIT (1/0)
+"""
+
 
 def build_sql_prompt(
     question: str,
     schema: str,
     dialect: str = "ansi",
+    current_user_id: int | None = None,
 ) -> str:
     """
     Build the full prompt sent to the Ollama model.
@@ -40,6 +52,8 @@ def build_sql_prompt(
         question: The user's natural-language question.
         schema: Database schema as text (from connector.get_schema()).
         dialect: SQL dialect hint (postgresql, mysql, sqlite, etc.).
+        current_user_id: The ID of the logged-in user, injected so the LLM
+                         can resolve references like "my records" or "من".
 
     Returns:
         Formatted prompt string.
@@ -52,6 +66,16 @@ def build_sql_prompt(
     elif "ps_orders" in schema_lower or "ps_customer" in schema_lower:
         platform_hints = PRESTASHOP_HINTS
 
+    # Inject T-SQL dialect hints for SQL Server connections
+    dialect_hints = ""
+    if dialect == "tsql":
+        dialect_hints = TSQL_HINTS
+
+    # Inject current user context if available
+    user_context = ""
+    if current_user_id is not None:
+        user_context = f"\n## Current User:\nThe logged-in user's ID is: {current_user_id}\nUse this value directly when the question refers to 'me', 'my', 'من', 'مال من', etc.\n"
+
     prompt = f"""You are ByteBudd, an expert SQL assistant. Your job is to convert natural language questions into safe, read-only SQL queries.
 
 ## Rules (CRITICAL - follow exactly):
@@ -61,12 +85,12 @@ def build_sql_prompt(
 4. Use proper {dialect.upper()} syntax
 5. Return ONLY the SQL query — no explanations, no markdown, no code fences
 6. If the question cannot be answered with the available schema, respond with: ERROR: <reason>
+7. NEVER use placeholders like <value> or <YourUserID> — always use real values from the context provided
 
 ## Database Schema:
 {schema}
-
-{platform_hints}
-
+{user_context}
+{platform_hints}{dialect_hints}
 ## User Question:
 {question}
 

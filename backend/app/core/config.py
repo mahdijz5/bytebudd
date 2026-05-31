@@ -39,7 +39,7 @@ class Settings(BaseSettings):
 
     # ── Ollama ───────────────────────────────────────────────────────────
     ollama_base_url: str = Field(
-        default="http://192.168.1.99:11434", alias="OLLAMA_BASE_URL"
+        default="http://host.docker.internal:11434", alias="OLLAMA_BASE_URL"
     )
     ollama_model: str = Field(
         default="qwen2.5-coder:8b", alias="OLLAMA_MODEL"

@@ -12,23 +12,27 @@ export interface User {
 export interface DBConnection {
   id: number;
   name: string;
-  db_type: "postgresql" | "mysql" | "mariadb" | "sqlite";
+  db_type: "postgresql" | "mysql" | "mariadb" | "sqlite" | "mssql";
   host: string | null;
   port: number | null;
   database_name: string;
   username: string | null;
   is_active: boolean;
+  instance_name?: string | null;
+  odbc_driver?: string | null;
 }
 
 export interface DBConnectionCreate {
   name: string;
-  db_type: "postgresql" | "mysql" | "mariadb" | "sqlite";
+  db_type: "postgresql" | "mysql" | "mariadb" | "sqlite" | "mssql";
   host?: string;
   port?: number;
   database_name: string;
   username?: string;
   password?: string;
   sqlite_path?: string;
+  instance_name?: string;
+  odbc_driver?: string;
 }
 
 export interface Conversation {

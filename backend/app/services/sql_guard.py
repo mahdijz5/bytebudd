@@ -41,7 +41,13 @@ def validate_sql(sql: str, dialect: str = "ansi") -> str:
     1. Strip and clean the input
     2. Check for blocked keywords via regex (fast path)
     3. Parse with sqlglot to verify statement type
-    4. Ensure a LIMIT clause is present (add if missing)
+    4. Ensure a LIMIT/TOP clause is present (add if missing)
+
+    Args:
+        sql: The SQL string to validate.
+        dialect: The SQL dialect to use for parsing and output.
+                 Use ``"tsql"`` for SQL Server, or ``"ansi"`` (default) for
+                 standard SQL. T-SQL output will use TOP N syntax.
 
     Returns:
         Cleaned, safe SQL string ready for execution.
@@ -52,22 +58,33 @@ def validate_sql(sql: str, dialect: str = "ansi") -> str:
     if not sql or not sql.strip():
         raise SQLGuardError("Empty SQL query")
 
-    # Step 1: Clean up - remove markdown code fences LLMs sometimes add
+    # Step 1: Clean up - strip ANSI escape codes and markdown fences LLMs emit
     sql = _strip_markdown(sql)
 
-    # Step 2: Fast keyword check (case-insensitive on uppercased SQL)
+    # Step 1b: Detect LLM placeholders like <YourUserID> or <value>
+    # These mean the LLM couldn't determine a value and needs more context.
+    placeholder = re.search(r"<[^>]+>", sql)
+    if placeholder:
+        raise SQLGuardError(
+            f"The query contains a placeholder '{placeholder.group()}' — "
+            "please provide more specific information (e.g. your user ID or name) so the query can be completed."
+        )
+
+    # Step 2: Fast keyword check (case-insensitive)
     upper_sql = sql.upper()
     for keyword in BLOCKED_KEYWORDS:
-        # Use word boundary to avoid false positives (e.g. "select" vs "selecting")
         pattern = r"\b" + keyword + r"\b"
         if re.search(pattern, upper_sql):
             raise SQLGuardError(
                 f"Operation '{keyword}' is not allowed. ByteBudd runs read-only queries only."
             )
 
-    # Step 3: Parse with sqlglot
+    # Step 3: Parse with sqlglot using the correct dialect.
+    # sqlglot v26+ normalises T-SQL TOP N into a Limit node internally,
+    # so we always work with Limit nodes regardless of dialect.
+    parse_dialect = dialect if dialect != "ansi" else None
     try:
-        statements = sqlglot.parse(sql)
+        statements = sqlglot.parse(sql, dialect=parse_dialect)
     except sqlglot.errors.ParseError as e:
         raise SQLGuardError(f"SQL parse error: {e}")
 
@@ -86,41 +103,46 @@ def validate_sql(sql: str, dialect: str = "ansi") -> str:
             f"Statement type '{stmt_type}' is not allowed. Only SELECT queries are permitted."
         )
 
-    # Step 5: Ensure LIMIT clause exists
-    sql_with_limit = _ensure_limit(statement, sql)
-
-    return sql_with_limit
+    # Step 5: Enforce row cap and return SQL in the correct dialect
+    return _ensure_limit(statement, dialect=dialect)
 
 
 def _strip_markdown(sql: str) -> str:
-    """Remove markdown code fences that LLMs sometimes wrap SQL in."""
+    """Remove ANSI escape codes and markdown fences that LLMs sometimes emit."""
+    # Remove ANSI escape sequences: full form \x1b[...m and orphaned bracket form [...m
+    sql = re.sub(r"\x1b\[[0-9;]*m", "", sql)
+    sql = re.sub(r"\[[0-9;]*m", "", sql)
     # Remove ```sql ... ``` blocks
     sql = re.sub(r"```(?:sql)?\s*\n?", "", sql, flags=re.IGNORECASE)
     sql = re.sub(r"```\s*$", "", sql, flags=re.MULTILINE)
     return sql.strip().rstrip(";").strip()
 
 
-def _ensure_limit(statement: exp.Expression, original_sql: str) -> str:
+def _ensure_limit(statement: exp.Expression, dialect: str = "ansi") -> str:
     """
-    Ensure the query has a LIMIT clause.
-    If missing, add LIMIT 1000.
-    If present but > 1000, cap at 1000.
+    Ensure the query has a row cap, then regenerate SQL in the target dialect.
+
+    sqlglot v26+ represents both LIMIT N and TOP N as a Limit node internally.
+    Regenerating with dialect="tsql" produces TOP N; anything else produces LIMIT N.
+
+    - No Limit node: inject LIMIT 1000 (becomes TOP 1000 for tsql output).
+    - Limit <= 1000: leave as-is.
+    - Limit > 1000: cap at 1000.
     """
-    # Find any existing LIMIT
+    out_dialect = dialect if dialect != "ansi" else None
+
     limit_node = statement.find(exp.Limit)
 
     if limit_node is None:
-        # No LIMIT: append one
-        return f"{original_sql} LIMIT {DEFAULT_LIMIT}"
+        # No row cap — add one
+        statement.set("limit", exp.Limit(expression=exp.Literal.number(DEFAULT_LIMIT)))
+    else:
+        # Row cap exists — enforce ceiling
+        try:
+            limit_val = int(limit_node.expression.this)
+            if limit_val > DEFAULT_LIMIT:
+                limit_node.set("expression", exp.Literal.number(DEFAULT_LIMIT))
+        except (AttributeError, ValueError):
+            pass  # Can't parse the value — leave as-is
 
-    # Has a LIMIT: check if it exceeds our cap
-    try:
-        limit_val = int(limit_node.this.this)
-        if limit_val > DEFAULT_LIMIT:
-            # Replace the limit value
-            limit_node.set("this", exp.Literal.number(DEFAULT_LIMIT))
-            return statement.sql()
-    except (AttributeError, ValueError):
-        pass  # Can't parse limit value, leave as-is
-
-    return original_sql
+    return statement.sql(dialect=out_dialect)

@@ -11,6 +11,7 @@ export function dbTypeLabel(dbType: string): string {
     mysql: "MySQL",
     mariadb: "MariaDB",
     sqlite: "SQLite",
+    mssql: "SQL Server",
   };
   return labels[dbType] || dbType;
 }
@@ -21,6 +22,7 @@ export function dbTypeColor(dbType: string): string {
     mysql: "bg-orange-100 text-orange-800",
     mariadb: "bg-amber-100 text-amber-800",
     sqlite: "bg-gray-100 text-gray-800",
+    mssql: "bg-red-100 text-red-800",
   };
   return colors[dbType] || "bg-gray-100 text-gray-800";
 }

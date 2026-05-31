@@ -1,9 +1,11 @@
 """
 Ollama Profiles API — admin CRUD + activate/deactivate + model fetching.
-Regular users can GET /active to list profiles available for query selection.
+Regular users can GET /active to see profiles available for query selection.
 """
 
 import logging
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,9 +40,8 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-# ── Helper: map service exceptions to HTTP responses ─────────────────────
-
 def _handle_service_error(exc: Exception) -> None:
+    """Map service-layer exceptions to appropriate HTTP responses."""
     if isinstance(exc, ProfileNotFoundError):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
     if isinstance(exc, ProfileNameConflictError):
@@ -50,17 +51,12 @@ def _handle_service_error(exc: Exception) -> None:
     raise exc
 
 
-# ── Endpoints ─────────────────────────────────────────────────────────────
-
 @router.post("/fetch-models", response_model=FetchModelsResponse)
 async def fetch_models(
     payload: FetchModelsRequest,
     _admin: User = Depends(get_admin_user),
 ):
-    """
-    Probe an Ollama host URL and return its available models.
-    Admin only.
-    """
+    """Probe an Ollama host and return its available models. Admin only."""
     try:
         models = await fetch_models_from_host(payload.host_url)
         return FetchModelsResponse(models=models)
@@ -73,10 +69,7 @@ async def list_active_profiles(
     db: AsyncSession = Depends(get_db),
     _user: User = Depends(get_current_user),
 ):
-    """
-    Return all active Ollama profiles.
-    Available to all authenticated users (for the Profile_Selector).
-    """
+    """Return all active Ollama profiles. Available to all authenticated users."""
     profiles = await get_active_profiles(db)
     return [OllamaProfileOut.model_validate(p) for p in profiles]
 
@@ -87,26 +80,23 @@ async def list_all_profiles(
     _admin: User = Depends(get_admin_user),
 ):
     """
-    Return all Ollama profiles (admin only).
-    Includes a synthetic read-only "Environment Default" entry (id=0)
-    when OLLAMA_BASE_URL is configured.
+    Return all Ollama profiles. Admin only.
+    Includes a synthetic 'Environment Default' entry when OLLAMA_BASE_URL is set.
     """
     profiles = await list_profiles(db)
     result = [OllamaProfileOut.model_validate(p) for p in profiles]
 
-    # Prepend synthetic env-var entry if configured
     if settings.ollama_base_url:
-        from datetime import datetime, timezone
-        env_entry = OllamaProfileOut(
+        now = datetime.now(timezone.utc)
+        result.append(OllamaProfileOut(
             id=0,
             name="Environment Default",
-            host_url=settings.ollama_base_url or "",
+            host_url=settings.ollama_base_url,
             models=[settings.ollama_model] if settings.ollama_model else [],
             is_active=True,
-            created_at=datetime.now(timezone.utc),
-            updated_at=datetime.now(timezone.utc),
-        )
-        result.append(env_entry)
+            created_at=now,
+            updated_at=now,
+        ))
 
     return result
 
