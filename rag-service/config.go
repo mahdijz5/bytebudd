@@ -1,0 +1,82 @@
+package main
+
+import (
+	"os"
+	"strconv"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+)
+
+// Config holds all application configuration loaded from environment variables.
+type Config struct {
+	Port           int
+	QdrantHost     string
+	QdrantPort     int
+	OllamaURL      string
+	EmbeddingModel string
+	ChatModel      string
+	VectorSize     int
+	CollectionName string
+	CORSOrigins    []string
+	ChunkSize      int
+	ChunkOverlap   int
+	TopK           int
+}
+
+// loadConfig reads configuration from environment variables with sensible defaults.
+func loadConfig() *Config {
+	config := &Config{
+		Port:           getEnvInt("PORT", 8081),
+		QdrantHost:     getEnvString("QDRANT_HOST", "localhost"),
+		QdrantPort:     getEnvInt("QDRANT_PORT", 6334),
+		OllamaURL:      getEnvString("OLLAMA_URL", "http://localhost:11434"),
+		EmbeddingModel: getEnvString("EMBEDDING_MODEL", "nomic-embed-text"),
+		ChatModel:      getEnvString("CHAT_MODEL", "llama3"),
+		VectorSize:     getEnvInt("VECTOR_SIZE", 768),
+		CollectionName: getEnvString("COLLECTION_NAME", "documents"),
+		ChunkSize:      getEnvInt("CHUNK_SIZE", 500),
+		ChunkOverlap:   getEnvInt("CHUNK_OVERLAP", 100),
+		TopK:           getEnvInt("TOP_K", 3),
+	}
+
+	// Parse CORS origins from comma-separated string
+	if origins := getEnvString("CORS_ORIGINS", "http://localhost,http://localhost:3000"); origins != "" {
+		config.CORSOrigins = strings.Split(origins, ",")
+		for i, origin := range config.CORSOrigins {
+			config.CORSOrigins[i] = strings.TrimSpace(origin)
+		}
+	}
+
+	return config
+}
+
+// getEnvString returns the environment variable value or the default if not set.
+func getEnvString(key, defaultValue string) string {
+	if value, exists := os.LookupEnv(key); exists && value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+// getEnvInt returns the environment variable as an integer or the default if not set.
+func getEnvInt(key string, defaultValue int) int {
+	if value, exists := os.LookupEnv(key); exists && value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			return parsed
+		}
+	}
+	return defaultValue
+}
+
+// getCORSConfig returns the Gin CORS configuration based on loaded settings.
+func (c *Config) getCORSConfig() gin.H {
+	return gin.H{
+		"allowOrigins":     c.CORSOrigins,
+		"allowMethods":     []string{"GET", "POST", "OPTIONS"},
+		"allowHeaders":     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Requested-With"},
+		"exposeHeaders":    []string{"Content-Length"},
+		"allowCredentials": true,
+		"maxAge":           12 * 60 * 60, // 12 hours
+	}
+}
