@@ -107,6 +107,46 @@ services:
     networks:
       - bytebudd-net
 
+  # ── Qdrant (Vector Database for RAG) ──────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:1.11-alpine
+    container_name: bytebudd-qdrant
+    ports:
+      - "6333:6333"  # REST API
+      - "6334:6334"  # gRPC
+    volumes:
+      - ./data/qdrant:/qdrant/storage
+    restart: unless-stopped
+    networks:
+      - bytebudd-net
+
+  # ── Go RAG Service ────────────────────────────────────────────────────────
+  rag-service:
+    build:
+      context: ./rag-service
+      dockerfile: Dockerfile
+    container_name: bytebudd-rag-service
+    environment:
+      - PORT=8081
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6334
+      - OLLAMA_URL=http://host.docker.internal:11434
+      - EMBEDDING_MODEL=${RAG_EMBEDDING_MODEL:-nomic-embed-text}
+      - CHAT_MODEL=${RAG_CHAT_MODEL:-llama3}
+      - VECTOR_SIZE=${RAG_VECTOR_SIZE:-768}
+      - COLLECTION_NAME=${RAG_COLLECTION_NAME:-documents}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost,http://localhost:3000}
+      - CHUNK_SIZE=500
+      - CHUNK_OVERLAP=100
+      - TOP_K=3
+    ports:
+      - "8081:8081"
+    depends_on:
+      - qdrant
+    restart: unless-stopped
+    networks:
+      - bytebudd-net
+
 networks:
   bytebudd-net:
     driver: bridge
