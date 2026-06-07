@@ -242,3 +242,138 @@ bytebudd/
 | `ENVIRONMENT`                 | `development` or `production`                      | `development`                    |
 | `ADMIN_EMAIL`                 | Default admin email for `create_admin.py`          | `admin@bytebudd.local`           |
 | `ADMIN_PASSWORD`              | Default admin password for `create_admin.py`       | `admin123`                       |
+
+---
+
+## Running services without Docker (Development)
+
+### 1. Python Backend
+
+```powershell
+# 1. Create and activate virtual environment
+cd backend
+python -m venv venv
+venv\Scripts\Activate   # Windows
+# source venv/bin/activate  # Linux/Mac
+
+# 2. Install dependencies
+pip install -r requirements.txt
+
+# 3. Copy and configure .env
+copy ..\.env.example .env    # Windows
+# cp ../.env.example .env    # Linux/Mac
+
+# Edit .env with your settings:
+#   DATABASE_URL=postgresql+asyncpg://bytebudd:bytebudd_secret@localhost:5432/bytebudd
+#   OLLAMA_BASE_URL=http://localhost:11434
+#   SECRET_KEY=your-secret-key
+#   ENCRYPTION_KEY=your-32-char-key
+
+# 4. Run migrations (first time only)
+alembic upgrade head
+
+# 5. Create admin user (first time only)
+python scripts/create_admin.py
+
+# 6. Start the server
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+The API will be available at **http://localhost:8000**  
+Swagger docs at **http://localhost:8000/api/docs**
+
+---
+
+### 2. React Frontend (Next.js)
+
+```powershell
+# 1. Install Node.js dependencies
+cd frontend
+npm install
+
+# 2. Configure environment
+copy ..\.env.example .env.local    # Windows
+# cp ../.env.example .env.local    # Linux/Mac
+
+# Edit .env.local:
+#   NEXT_PUBLIC_API_URL=http://localhost:8000/api
+
+# 3. Start the development server
+npm run dev
+```
+
+The frontend will be available at **http://localhost:3000**
+
+> **Note:** If the Python backend is running on port 8000, you may need to update `NEXT_PUBLIC_API_URL` in `.env.local` to point to it.
+
+---
+
+### 3. Go RAG Service
+
+```powershell
+# 1. Install Go dependencies
+cd rag-service
+
+# Set Go proxy if needed
+$env:GOPROXY="https://proxy.golang.org,direct"
+go mod download
+go mod tidy
+
+# 2. Configure environment
+copy .env.example .env    # Windows
+# cp .env.example .env    # Linux/Mac
+
+# 3. Run the service
+go run main.go
+```
+
+The RAG service will be available at **http://localhost:8081**
+
+---
+
+### Full local development setup (all services)
+
+```powershell
+# Terminal 1 - Python Backend
+cd backend
+python -m venv venv
+venv\Scripts\Activate
+pip install -r requirements.txt
+copy ..\.env.example .env
+# edit .env
+alembic upgrade head
+python scripts/create_admin.py
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+# Terminal 2 - React Frontend
+cd frontend
+npm install
+copy ..\.env.example .env.local
+# edit .env.local (set NEXT_PUBLIC_API_URL=http://localhost:8000/api)
+npm run dev
+
+# Terminal 3 - Go RAG Service (optional)
+cd rag-service
+go mod download
+copy .env.example .env
+# edit .env
+go run main.go
+
+# Terminal 4 - Qdrant (for RAG)
+docker run -d --name qdrant -p 6333:6333 -p 6334:6334 qdrant/qdrant:1.11-alpine
+
+# Terminal 5 - PostgreSQL (for Python backend, if not using Docker)
+# Install PostgreSQL locally and create database:
+#   createdb bytebudd
+#   psql -d bytebudd -c "CREATE USER bytebudd WITH PASSWORD 'bytebudd_secret';"
+#   psql -d bytebudd -c "GRANT ALL PRIVILEGES ON DATABASE bytebudd TO bytebudd;"
+```
+
+**Services running locally:**
+| Service | URL | Port |
+|---------|-----|------|
+| Frontend | http://localhost:3000 | 3000 |
+| Python API | http://localhost:8000 | 8000 |
+| RAG Service | http://localhost:8081 | 8081 |
+| Qdrant | localhost:6333 (REST), localhost:6334 (gRPC) | 6333/6334 |
+| Ollama | http://localhost:11434 | 11434 |
