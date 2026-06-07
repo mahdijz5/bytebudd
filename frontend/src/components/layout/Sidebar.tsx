@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { MessageSquare, Database, Plus, LogOut, Bot, Cpu } from "lucide-react";
+import { MessageSquare, Database, Plus, LogOut, Bot, Cpu, BookOpen } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { logout } from "@/lib/auth";
 import { Conversation, User } from "@/types";
@@ -35,6 +35,12 @@ export function Sidebar({ conversations, onNewConversation, user }: SidebarProps
         </NavLink>
         <NavLink href="/databases" icon={<Database className="w-4 h-4" />} active={pathname === "/databases"}>
           Databases
+        </NavLink>
+        <NavLink href="/rag-chat" icon={<Bot className="w-4 h-4" />} active={pathname === "/rag-chat"}>
+          RAG Chat
+        </NavLink>
+        <NavLink href="/documents" icon={<BookOpen className="w-4 h-4" />} active={pathname === "/documents"}>
+          Documents
         </NavLink>
         {user?.role === "admin" && (
           <NavLink

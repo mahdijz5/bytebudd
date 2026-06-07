@@ -52,6 +52,11 @@ class Settings(BaseSettings):
         alias="CORS_ORIGINS",
     )
 
+    # ── RAG Service ──────────────────────────────────────────────────────
+    rag_service_url: str = Field(
+        default="http://host.docker.internal:8081", alias="RAG_SERVICE_URL"
+    )
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",")]

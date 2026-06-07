@@ -250,3 +250,123 @@ export const ollamaProfileApi = {
 
   listActive: () => apiFetch<OllamaProfile[]>("/ollama-profiles/active"),
 };
+
+// ── RAG API ───────────────────────────────────────────────────────────────
+
+export interface SourceInfo {
+  content: string;
+  filename: string;
+  score: number;
+}
+
+export interface RAGQueryResponse {
+  is_sql_query: boolean;
+  answer?: string;
+  sources?: SourceInfo[];
+  error?: string;
+}
+
+export interface UploadResponse {
+  success: boolean;
+  file_id: string;
+  filename: string;
+  chunks_count: number;
+  message: string;
+}
+
+// RAG query with SSE streaming
+export async function streamRAGQuery(
+  question: string,
+  onEvent: (event: string, data: unknown) => void,
+  onDone: () => void,
+  onError: (error: string) => void,
+): Promise<void> {
+  const token = getToken();
+
+  const response = await fetch(`${API_BASE}/v1/rag/query/stream`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ query: question }),
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: "Stream failed" }));
+    onError(err.detail || "Stream failed");
+    return;
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    onError("No response body");
+    return;
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+
+    const lines = buffer.split("\n\n");
+    buffer = lines.pop() || "";
+
+    for (const chunk of lines) {
+      if (!chunk.trim()) continue;
+
+      const eventMatch = chunk.match(/^event: (\w+)/m);
+      const dataMatch = chunk.match(/^data: (.+)/ms);
+
+      if (eventMatch && dataMatch) {
+        const eventName = eventMatch[1];
+        try {
+          const data = JSON.parse(dataMatch[1]);
+          onEvent(eventName, data);
+
+          if (eventName === "done") {
+            onDone();
+          } else if (eventName === "error") {
+            onError(data.message || "Unknown error");
+          }
+        } catch {
+          console.warn("Failed to parse SSE data:", dataMatch[1]);
+        }
+      }
+    }
+  }
+}
+
+// RAG file upload
+export async function uploadRAGFile(
+  file: File,
+  onProgress?: (percent: number) => void,
+): Promise<UploadResponse> {
+  const token = getToken();
+  const formData = new FormData();
+  formData.append("file", file);
+
+  onProgress?.(10);
+
+  const response = await fetch(`${API_BASE}/v1/rag/upload`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+    body: formData,
+  });
+
+  onProgress?.(80);
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: "Upload failed" }));
+    throw new Error(error.detail || "Upload failed");
+  }
+
+  onProgress?.(100);
+  return response.json();
+}
