@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -144,6 +145,6 @@ A question is NOT SQL-related if:
 		return false, err
 	}
 
-	response = bytes.TrimSpace([]byte(response))
-	return bytes.EqualFold(response, []byte("yes")), nil
+	response = strings.TrimSpace(strings.ToLower(response))
+	return strings.HasPrefix(response, "yes"), nil
 }

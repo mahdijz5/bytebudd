@@ -63,7 +63,14 @@ func NewRAGHandler(config *Config, ollama *OllamaClient, qdrant *QdrantClient, p
 // SetupRoutes configures all HTTP routes on the Gin engine.
 func (h *RAGHandler) SetupRoutes(router *gin.Engine) {
 	// Apply CORS middleware
-	router.Use(cors.New(h.config.getCORSConfig()))
+	router.Use(cors.New(cors.Config{
+		AllowOrigins:     h.config.CORSOrigins,
+		AllowMethods:     []string{"GET", "POST", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Requested-With"},
+		ExposeHeaders:    []string{"Content-Length"},
+		AllowCredentials: true,
+		MaxAge:           12 * 60 * 60, // 12 hours
+	}))
 
 	// Health check
 	router.GET("/health", h.HealthHandler)

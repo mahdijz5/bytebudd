@@ -1,0 +1,165 @@
+[33mcommit 0208eca9e82dfdbc4c32d74545a4f19c91f518c7[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m
+Author: parsa hesamzadeh <parsahesamzadeh2005@gmail.com>
+Date:   Sun May 31 23:57:26 2026 +0330
+
+    remove .kiro
+
+[33mcommit 06f53fd65d7c949eb9c88a3de9a9aca6d5925e16[m
+Author: parsa hesamzadeh <parsahesamzadeh2005@gmail.com>
+Date:   Sun May 31 23:49:31 2026 +0330
+
+    feat: add SQL Server support, enhance prompt context, and strengthen SQL validation
+    
+    - Add MSSQL connector with pyodbc and ODBC Driver 18 in Dockerfile
+    - Extend DBConnection model and schemas with instance_name, odbc_driver
+    - Frontend UI for SQL Server connection details + type label/color
+    - Refactor Ollama client: share generation logic, unify options
+    - Inject current_user_id into SQL prompt to resolve 'me/my' references
+    - Improve sql_guard: strip ANSI codes, detect placeholders like <YourUserID>,
+      handle T-SQL TOP via sqlglot dialect (ensures row cap as LIMIT or TOP)
+    - Security: .env.example warnings, change default admin password prompt,
+      remove unused bcrypt/python-multipart from requirements
+    - Docker: add proxy build args, make POSTGRES_PASSWORD overridable,
+      fix CORS_ORIGINS default to explicit origins
+    - Ignore .kiro/ editor folder
+
+[33mcommit d155cbd59ea0036d9d963d96132e70f1087d96dd[m
+Author: parsa hesamzadeh <parsahesamzadeh2005@gmail.com>
+Date:   Sun May 24 15:16:01 2026 +0330
+
+    refactor: cleanup, security fixes, and dead code removal
+    
+    - Security: block disabled users from authenticating (deps.py)
+    - Security: remove hardcoded proxy IP from Dockerfile
+    - Security: replace hardcoded Ollama IP in docker-compose with env var
+    - Remove unused PyMySQL and python-dotenv dependencies
+    - Remove duplicate fetch_models() from ollama_client (canonical version is in ollama_profile_service)
+    - Remove unused sqlalchemy func import from ollama_profile model
+    - Fix ChatWindow example questions to use React state instead of raw DOM manipulation
+    - Simplify SSE closure variables in ChatWindow (remove unused thinkingText/explanationText)
+    - Add safety comment on SQLite PRAGMA usage
+    - Update README to reflect current codebase state
+
+[33mcommit fa42df647e4de38cf2ef0b87158034d78b676406[m
+Author: parsa hesamzadeh <parsahesamzadeh2005@gmail.com>
+Date:   Sat May 23 00:35:37 2026 +0330
+
+    fix: use relative API URL so app works from other machines on the network
+
+[33mcommit 3068f9c745a4bd87c81ebebf76025e83a4d12edd[m
+Merge: cf385f7 92611aa
+Author: Parsa Hesamzadeh <parsahesamzadeh2005@gmail.com>
+Date:   Fri May 22 19:38:16 2026 +0330
+
+    Merge pull request #1 from parsahesamzadeh2005/feat/ollama-profile-management
+    
+    feat: Ollama profile management
+
+[33mcommit 92611aa41be8c8f3afeae1db6ffa035e9a815bfe[m
+Author: parsa hesamzadeh <parsahesamzadeh2005@gmail.com>
+Date:   Fri May 22 19:37:01 2026 +0330
+
+    feat: Ollama profile management
+    
+    - Add ollama_profiles table (migration 0003) with name, host_url,
+      models (JSON), is_active, timestamps
+    
+    Backend:
+    - OllamaProfile SQLAlchemy model
+    - Pydantic schemas with HTTP URL validation
+    - Service layer: CRUD, host probing (/api/tags, 10s timeout),
+      activate/deactivate, query routing with env-var fallback
+    - REST router at /api/v1/ollama-profiles/ (8 endpoints, admin-only
+      except GET /active which is open to all authenticated users)
+    - OllamaClient: add fetch_models() and generate_with_profile() helpers
+    - query_pipeline + QueryRequest: accept profile_id + model_name,
+      route through selected profile or fall back to env vars
+    
+    Frontend:
+    - OllamaProfile types in types/index.ts
+    - ollamaProfileApi client + streamQuery updated with profile params
+    - Sidebar: show Ollama Profiles nav link for admin role only
+    - ProfileSelector: active-profile + model picker in ChatWindow
+    - ProfileFormModal: host probe -> model checkboxes -> create/edit
+    - ProfileList: table with active toggle, edit, delete (with confirm)
+    - /admin/ollama-profiles page: full admin management UI
+    - All pages pass user prop to Sidebar for role-based nav
+
+[33mcommit cf385f7242115d06e7c47376d5a62d68984ff023[m
+Author: parsa hesamzadeh <parsahesamzadeh2005@gmail.com>
+Date:   Fri May 22 18:38:22 2026 +0330
+
+    fix: login page fails silently with valid credentials
+    
+    - api.ts: skip redirect-to-login on 401 for the login endpoint itself,
+      so wrong-credential errors surface in the UI instead of causing a
+      page reload
+    - auth.py: relax LoginRequest email field from EmailStr to plain str
+      so .local / custom TLD addresses (e.g. admin@bytebudd.local) are
+      accepted by the backend validator
+    - login/page.tsx: change email input type from 'email' to 'text' to
+      match the relaxed backend validation
+    - docker-compose.yml: switch named volumes to bind mounts for postgres,
+      mysql, and frontend .next so data persists in ./data/
+    - .gitignore: update ignored paths to match new bind-mount locations
+
+[33mcommit b782b58759c0670ef255fbe4381ceda01abea0a0[m
+Author: parsa hesamzadeh <parsahesamzadeh2005@gmail.com>
+Date:   Fri May 22 18:06:52 2026 +0330
+
+    fix: persist query results in history so chat shows data table on reload
+    
+    - Add result_data (TEXT/JSON) column to messages table
+    - Migration 0002 adds the column
+    - query_pipeline saves rows/columns/row_count (capped at 200) alongside each assistant message
+    - MessageOut schema exposes result_data
+    - Frontend parses result_data on history load and passes it to DataGrid
+    - Revert MessageBubble band-aid, DataGrid now renders from history too
+
+[33mcommit 54f102ff97628ea1e237e4cab3255c5fa09a31b2[m
+Author: parsa hesamzadeh <parsahesamzadeh2005@gmail.com>
+Date:   Fri May 22 17:55:18 2026 +0330
+
+    refactor: move project files to repo root, remove bytebudd/ subfolder
+
+[33mcommit 820cacaace6ffd8c8fedf9811db11b2bc73f2930[m
+Author: parsa hesamzadeh <parsahesamzadeh2005@gmail.com>
+Date:   Fri May 22 17:46:13 2026 +0330
+
+    feat: add export-images.sh and EXPORT.md
+
+[33mcommit eb23ddcf965939dfc0c875c329ba9bb79cfc0ead[m
+Author: parsa hesamzadeh <parsahesamzadeh2005@gmail.com>
+Date:   Fri May 22 17:41:52 2026 +0330
+
+    chore: clean up codebase and fix build
+    
+    - Remove dead code: generate_stream(), createQueryStream(), formatDate/Time(), unused Base import
+    - Remove psycopg2-binary (unused sync driver)
+    - Remove duplicate backend/create_admin.py, move to backend/scripts/
+    - Remove ollama-test/ scratch folder and root-level Hono scaffold
+    - Remove empty frontend/src/components/ui/ and src/hooks/ dirs
+    - Replace all .md files with a single clean README.md
+    - Add comprehensive .gitignore at root and bytebudd/ level
+    - Fix backend Dockerfile: remove broken proxy, use 172.17.0.1:2080
+    - Fix docker-compose: remove obsolete version field
+    - Fix start.sh and init.sh: correct create_admin.py path
+    - Fix init.sh: remove reference to non-existent ollama container
+
+[33mcommit 6f4dcd704ad2254e365620547a784c863c3a5399[m
+Author: parsa hesamzadeh <parsahesamzadeh2005@gmail.com>
+Date:   Fri May 22 16:49:43 2026 +0330
+
+    feat: add start.sh and stop.sh for docker management
+
+[33mcommit a04be7e03e51391aeeb982a3c3ed65182d3c25a2[m
+Author: parsa hesamzadeh <parsahesamzadeh2005@gmail.com>
+Date:   Fri May 22 16:46:12 2026 +0330
+
+    feat: add edit connection form to databases page
+
+[33mcommit 07dd9a3c142f44b584faf97518b7a4ef0d813ad3[m
+Author: parsa hesamzadeh <parsahesamzadeh2005@gmail.com>
+Date:   Fri May 22 16:36:45 2026 +0330
+
+    initial commit

@@ -18,11 +18,11 @@ type QdrantClient struct {
 
 // DocumentChunk represents a chunk of text with its metadata.
 type DocumentChunk struct {
-	ID           string
-	Vector       []float32
-	PageContent  string
-	Source       string
-	Score        *float64
+	ID          string
+	Vector      []float32
+	PageContent string
+	Source      string
+	Score       *float64
 }
 
 // NewQdrantClient creates a new Qdrant client connection.
@@ -60,12 +60,15 @@ func (c *QdrantClient) EnsureCollection() error {
 	}
 
 	fmt.Printf("Creating Qdrant collection '%s' with Cosine similarity...\n", c.collectionName)
+	
+	vectorsConfig := qdrant.NewVectorsConfig(&qdrant.VectorParams{
+		Size:     uint64(c.vectorSize),
+		Distance: qdrant.Distance_Cosine,
+	})
+	
 	err = c.client.CreateCollection(c.ctx, &qdrant.CreateCollection{
 		CollectionName: c.collectionName,
-		VectorsConfig: qdrant.NewVectorsConfig(&qdrant.VectorParams{
-			Size:     c.vectorSize,
-			Distance: qdrant.Distance_Cosine,
-		}),
+		VectorsConfig:  vectorsConfig,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create collection: %w", err)
@@ -79,11 +82,10 @@ func (c *QdrantClient) UpsertChunks(chunks []DocumentChunk) error {
 	var points []*qdrant.PointStruct
 
 	for _, chunk := range chunks {
-		payload := qdrant.NewValueMap(map[string]interface{}{
-			"page_content": chunk.PageContent,
-			"source":       chunk.Source,
-		})
-
+		payload := make(map[string]*qdrant.Value)
+		payload["page_content"] = qdrant.NewValueString(chunk.PageContent)
+		payload["source"] = qdrant.NewValueString(chunk.Source)
+		
 		point := &qdrant.PointStruct{
 			Id:      qdrant.NewIDUUID(uuid.New().String()),
 			Vectors: qdrant.NewVectorsDense(chunk.Vector),
@@ -119,9 +121,16 @@ func (c *QdrantClient) SearchSimilar(queryVector []float32, topK int) ([]Documen
 
 	var chunks []DocumentChunk
 	for _, point := range searchResult {
-		content, _ := point.Payload["page_content"].GetStringValue()
-		source, _ := point.Payload["source"].GetStringValue()
-		score := point.Score
+		var content, source string
+		
+		if p, ok := point.Payload["page_content"]; ok {
+			content = p.GetStringValue()
+		}
+		if p, ok := point.Payload["source"]; ok {
+			source = p.GetStringValue()
+		}
+		
+		score := float64(point.Score)
 
 		chunks = append(chunks, DocumentChunk{
 			ID:          point.Id.String(),
