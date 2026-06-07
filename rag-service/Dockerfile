@@ -1,34 +1,31 @@
 # Build stage
-FROM golang:1.21-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 WORKDIR /app
 
-# Install git for fetching dependencies
-RUN apk add --no-cache git
+RUN apk add --no-cache git ca-certificates
 
-# Copy go mod files first for better caching
+# 1. Copy BOTH mod and sum files
 COPY go.mod go.sum* ./
+
+# 2. Download dependencies directly (no tidy needed)
 RUN go mod download
 
-# Copy the rest of the source code
+# Copy source
 COPY . .
 
-# Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o rag-service .
+# Build
+RUN CGO_ENABLED=0 GOOS=linux go build -o rag-service .
 
-# Final stage
-FROM alpine:latest
+# Runtime stage
+FROM alpine:3.20
 
 WORKDIR /app
 
-# Install ca-certificates for HTTPS
-RUN apk --no-cache add ca-certificates
+RUN apk add --no-cache ca-certificates
 
-# Copy the binary from builder
 COPY --from=builder /app/rag-service .
 
-# Expose port
 EXPOSE 8081
 
-# Run the application
 CMD ["./rag-service"]
