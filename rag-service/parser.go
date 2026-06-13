@@ -5,11 +5,9 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
+	"log"
 	"strings"
 )
-
-// unused import marker - operators is intentionally unused
-var _ = []string{}
 
 // FileParser handles parsing of different file formats.
 type FileParser struct{}
@@ -21,7 +19,12 @@ func NewFileParser() *FileParser {
 
 // ParseFile parses the file content based on its extension and returns the text.
 func (p *FileParser) ParseFile(data []byte, filename string) (string, error) {
+	if filename == "" {
+		return "", fmt.Errorf("filename is empty")
+	}
+
 	ext := strings.ToLower(filename[strings.LastIndex(filename, "."):])
+	log.Printf("[PARSER] Parsing file: %s (ext=%s, size=%d bytes)", filename, ext, len(data))
 
 	switch ext {
 	case ".pdf":
@@ -30,8 +33,15 @@ func (p *FileParser) ParseFile(data []byte, filename string) (string, error) {
 		return p.ParseTXT(data)
 	case ".docx":
 		return p.ParseDOCX(data)
+	case ".md":
+		return p.ParseTXT(data)
+	case ".csv":
+		return p.ParseTXT(data)
+	case ".json":
+		return p.ParseTXT(data)
 	default:
-		return "", fmt.Errorf("unsupported file type: %s (expected .pdf, .txt, or .docx)", ext)
+		log.Printf("[PARSER] ERROR: Unsupported file type: %s", ext)
+		return "", fmt.Errorf("unsupported file type: %s (expected .pdf, .txt, .docx, .md, .csv, or .json)", ext)
 	}
 }
 
@@ -39,10 +49,10 @@ func (p *FileParser) ParseFile(data []byte, filename string) (string, error) {
 func (p *FileParser) ParsePDF(data []byte) (string, error) {
 	_ = bytes.NewReader(data) // Simple PDF text extraction - look for text streams
 	var textParts []string
-	
+
 	// Try to find text content in PDF streams
 	content := string(data)
-	
+
 	// Look for text between BT (begin text) and ET (end text) operators
 	startIdx := 0
 	for {
@@ -50,23 +60,23 @@ func (p *FileParser) ParsePDF(data []byte) (string, error) {
 		if btIdx == -1 {
 			break
 		}
-		
+
 		etIdx := strings.Index(content[startIdx+btIdx:], "ET")
 		if etIdx == -1 {
 			break
 		}
-		
+
 		textBlock := content[startIdx+btIdx+2 : startIdx+btIdx+etIdx]
 		// Extract text from Tj and TJ operators
 		textParts = append(textParts, extractTextFromPDFBlock(textBlock))
-		
+
 		startIdx = startIdx + btIdx + etIdx + 2
 	}
-	
+
 	if len(textParts) > 0 {
 		return strings.Join(textParts, "\n"), nil
 	}
-	
+
 	// Fallback: try to extract readable text
 	textParts = extractReadableText(content)
 	return strings.Join(textParts, "\n"), nil
@@ -75,7 +85,7 @@ func (p *FileParser) ParsePDF(data []byte) (string, error) {
 // extractTextFromPDFBlock extracts readable text from a PDF text block.
 func extractTextFromPDFBlock(block string) string {
 	var texts []string
-	
+
 	// Look for (text) Tj pattern
 	remaining := block
 	for {
@@ -83,12 +93,12 @@ func extractTextFromPDFBlock(block string) string {
 		if tjIdx == -1 {
 			break
 		}
-		
+
 		// Find the closing parenthesis before Tj
 		searchStart := tjIdx - 1
 		escaped := false
 		parenIdx := -1
-		
+
 		for i := searchStart; i >= 0; i-- {
 			if escaped {
 				escaped = false
@@ -103,15 +113,15 @@ func extractTextFromPDFBlock(block string) string {
 				break
 			}
 		}
-		
+
 		if parenIdx != -1 {
 			text := remaining[parenIdx+1 : tjIdx]
 			texts = append(texts, decodePDFString(text))
 		}
-		
+
 		remaining = remaining[tjIdx+2:]
 	}
-	
+
 	return strings.Join(texts, " ")
 }
 
@@ -119,7 +129,7 @@ func extractTextFromPDFBlock(block string) string {
 func decodePDFString(s string) string {
 	var result strings.Builder
 	escaped := false
-	
+
 	for _, ch := range s {
 		if escaped {
 			switch ch {
@@ -145,14 +155,14 @@ func decodePDFString(s string) string {
 			result.WriteRune(ch)
 		}
 	}
-	
+
 	return result.String()
 }
 
 // extractReadableText extracts readable ASCII text from PDF content.
 func extractReadableText(content string) []string {
 	var texts []string
-	
+
 	// Simple approach: extract sequences of printable characters
 	var current strings.Builder
 	for _, ch := range content {
@@ -166,14 +176,14 @@ func extractReadableText(content string) []string {
 			current.Reset()
 		}
 	}
-	
+
 	if current.Len() > 0 {
 		text := strings.TrimSpace(current.String())
 		if len(text) > 3 {
 			texts = append(texts, text)
 		}
 	}
-	
+
 	return texts
 }
 
@@ -185,13 +195,13 @@ func (p *FileParser) ParseTXT(data []byte) (string, error) {
 // ParseDOCX extracts text content from a DOCX file by unzipping and reading the XML.
 func (p *FileParser) ParseDOCX(data []byte) (string, error) {
 	reader := bytes.NewReader(data)
-	
+
 	// Open the zip archive
 	zipReader, err := zip.NewReader(reader, reader.Size())
 	if err != nil {
 		return "", fmt.Errorf("failed to parse DOCX as ZIP: %w", err)
 	}
-	
+
 	// Find and read word/document.xml
 	var docXML []byte
 	for _, file := range zipReader.File {
@@ -201,40 +211,40 @@ func (p *FileParser) ParseDOCX(data []byte) (string, error) {
 				continue
 			}
 			defer rc.Close()
-			
+
 			buf := new(bytes.Buffer)
 			buf.ReadFrom(rc)
 			docXML = buf.Bytes()
 			break
 		}
 	}
-	
+
 	if len(docXML) == 0 {
 		return "", fmt.Errorf("document.xml not found in DOCX")
 	}
-	
+
 	// Parse XML and extract text
 	var textParts []string
-	
+
 	// Simple XML text extraction
 	doc := &DOCXDocument{}
 	if err := xml.Unmarshal(docXML, doc); err != nil {
 		return "", fmt.Errorf("failed to parse DOCX XML: %w", err)
 	}
-	
+
 	for _, para := range doc.Paragraphs {
 		if para.Text != "" {
 			textParts = append(textParts, para.Text)
 		}
 	}
-	
+
 	return strings.Join(textParts, "\n"), nil
 }
 
 // DOCXDocument represents the structure of word/document.xml
 type DOCXDocument struct {
-	XMLName      xml.Name `xml:"http://schemas.openxmlformats.org/wordprocessingml/2006/main document"`
-	Paragraphs   []Paragraph
+	XMLName    xml.Name `xml:"http://schemas.openxmlformats.org/wordprocessingml/2006/main document"`
+	Paragraphs []Paragraph
 }
 
 // Paragraph represents a paragraph in a DOCX document
