@@ -194,51 +194,114 @@ func (p *FileParser) ParseTXT(data []byte) (string, error) {
 
 // ParseDOCX extracts text content from a DOCX file by unzipping and reading the XML.
 func (p *FileParser) ParseDOCX(data []byte) (string, error) {
+	log.Printf("[PARSER] DOCX: Opening zip archive (size=%d bytes)", len(data))
+
 	reader := bytes.NewReader(data)
 
 	// Open the zip archive
 	zipReader, err := zip.NewReader(reader, reader.Size())
 	if err != nil {
+		log.Printf("[PARSER] DOCX: ERROR - Failed to parse as ZIP: %v", err)
 		return "", fmt.Errorf("failed to parse DOCX as ZIP: %w", err)
 	}
+
+	log.Printf("[PARSER] DOCX: Found %d files in zip", len(zipReader.File))
 
 	// Find and read word/document.xml
 	var docXML []byte
 	for _, file := range zipReader.File {
+		log.Printf("[PARSER] DOCX: Found file in zip: %s (size=%d)", file.Name, file.UncompressedSize64)
 		if file.Name == "word/document.xml" {
 			rc, err := file.Open()
 			if err != nil {
+				log.Printf("[PARSER] DOCX: ERROR - Failed to open document.xml: %v", err)
 				continue
 			}
-			defer rc.Close()
 
 			buf := new(bytes.Buffer)
 			buf.ReadFrom(rc)
 			docXML = buf.Bytes()
+			rc.Close()
+			log.Printf("[PARSER] DOCX: Read document.xml (%d bytes)", len(docXML))
 			break
 		}
 	}
 
 	if len(docXML) == 0 {
+		log.Printf("[PARSER] DOCX: ERROR - document.xml not found in DOCX")
 		return "", fmt.Errorf("document.xml not found in DOCX")
 	}
 
 	// Parse XML and extract text
 	var textParts []string
 
-	// Simple XML text extraction
-	doc := &DOCXDocument{}
-	if err := xml.Unmarshal(docXML, doc); err != nil {
-		return "", fmt.Errorf("failed to parse DOCX XML: %w", err)
-	}
+	// Simple XML text extraction - extract all text between <w:t> and </w:t> tags
+	// This regex approach is more reliable than struct-based parsing
+	textMatches := extractTextFromXML(string(docXML))
+	textParts = append(textParts, textMatches...)
 
-	for _, para := range doc.Paragraphs {
-		if para.Text != "" {
-			textParts = append(textParts, para.Text)
+	// If regex extraction failed, try struct-based parsing as fallback
+	if len(textParts) == 0 {
+		log.Printf("[PARSER] DOCX: Regex extraction found 0 results, trying struct-based parsing")
+		doc := &DOCXDocument{}
+		if err := xml.Unmarshal(docXML, doc); err != nil {
+			log.Printf("[PARSER] DOCX: ERROR - Struct parsing also failed: %v", err)
+			return "", fmt.Errorf("failed to parse DOCX XML: %w", err)
+		}
+
+		for _, para := range doc.Paragraphs {
+			if para.Text != "" {
+				textParts = append(textParts, para.Text)
+			}
 		}
 	}
 
+	if len(textParts) == 0 {
+		log.Printf("[PARSER] DOCX: ERROR - No text content extracted from DOCX")
+		return "", fmt.Errorf("no text content extracted from DOCX")
+	}
+
+	log.Printf("[PARSER] DOCX: Extracted %d text segments", len(textParts))
 	return strings.Join(textParts, "\n"), nil
+}
+
+// extractTextFromXML extracts text content from XML using string matching
+func extractTextFromXML(xmlContent string) []string {
+	var texts []string
+
+	// Look for <w:t>text</w:t> patterns
+	searchStart := 0
+	for {
+		// Find opening tag
+		openTag := strings.Index(xmlContent[searchStart:], "<w:t")
+		if openTag == -1 {
+			break
+		}
+
+		// Find the closing > of the opening tag
+		tagEnd := strings.Index(xmlContent[searchStart+openTag:], ">")
+		if tagEnd == -1 {
+			break
+		}
+
+		// Find the content
+		contentStart := searchStart + openTag + tagEnd + 1
+		closeTag := strings.Index(xmlContent[contentStart:], "</w:t>")
+		if closeTag == -1 {
+			break
+		}
+
+		text := xmlContent[contentStart : contentStart+closeTag]
+		// Clean up whitespace but preserve meaningful newlines
+		text = strings.TrimSpace(text)
+		if text != "" {
+			texts = append(texts, text)
+		}
+
+		searchStart = contentStart + closeTag + 6 // length of "</w:t>"
+	}
+
+	return texts
 }
 
 // DOCXDocument represents the structure of word/document.xml
@@ -249,5 +312,5 @@ type DOCXDocument struct {
 
 // Paragraph represents a paragraph in a DOCX document
 type Paragraph struct {
-	Text string `xml:"*>t"`
+	Text string `xml:"http://schemas.openxmlformats.org/wordprocessingml/2006/main t"`
 }

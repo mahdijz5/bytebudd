@@ -11,10 +11,10 @@ import (
 
 // OllamaClient handles all communication with the Ollama API.
 type OllamaClient struct {
-	BaseURL      string
+	BaseURL        string
 	EmbeddingModel string
-	ChatModel    string
-	httpClient   *http.Client
+	ChatModel      string
+	httpClient     *http.Client
 }
 
 // OllamaEmbedRequest is the payload for generating embeddings.
@@ -57,7 +57,9 @@ func NewOllamaClient(baseURL, embeddingModel, chatModel string) *OllamaClient {
 }
 
 // GetEmbedding generates an embedding vector for the given text using the configured embedding model.
+// Uses the same endpoint as ingestion-pipeline.go: /api/embeddings
 func (c *OllamaClient) GetEmbedding(text string) ([]float32, error) {
+	// Build request exactly like ingestion-pipeline.go
 	reqBody, err := json.Marshal(OllamaEmbedRequest{
 		Model:  c.EmbeddingModel,
 		Prompt: text,
@@ -66,25 +68,49 @@ func (c *OllamaClient) GetEmbedding(text string) ([]float32, error) {
 		return nil, fmt.Errorf("failed to marshal embedding request: %w", err)
 	}
 
-	resp, err := c.httpClient.Post(c.BaseURL+"/api/embeddings", "application/json", bytes.NewBuffer(reqBody))
+	// Use the same endpoint as ingestion-pipeline.go
+	embeddingURL := c.BaseURL + "/api/embeddings"
+
+	// DETAILED LOGGING: Log the exact request being sent
+	fmt.Printf("[EMBEDDING] URL: %s\n", embeddingURL)
+	fmt.Printf("[EMBEDDING] Model: %s\n", c.EmbeddingModel)
+	fmt.Printf("[EMBEDDING] Request body (raw): %s\n", string(reqBody))
+	fmt.Printf("[EMBEDDING] Text length: %d chars\n", len(text))
+	fmt.Printf("[EMBEDDING] Text preview: %.200s...\n", text)
+
+	// Try with a longer timeout like ingestion-pipeline.go (500s)
+	httpClient := &http.Client{Timeout: 500 * time.Second}
+
+	resp, err := httpClient.Post(embeddingURL, "application/json", bytes.NewBuffer(reqBody))
 	if err != nil {
-		return nil, fmt.Errorf("failed to call Ollama embeddings API: %w", err)
+		return nil, fmt.Errorf("failed to call Ollama embeddings API (%s): %w", embeddingURL, err)
 	}
 	defer resp.Body.Close()
 
+	fmt.Printf("[EMBEDDING] Response status code: %d (%s)\n", resp.StatusCode, resp.Status)
+
+	// Read and log the response body for debugging
+	var responseBody bytes.Buffer
+	if _, err := responseBody.ReadFrom(resp.Body); err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+	fmt.Printf("[EMBEDDING] Response body: %s\n", responseBody.String())
+
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Ollama embeddings API returned status: %s", resp.Status)
+		return nil, fmt.Errorf("Ollama embeddings API returned status: %s (model: %s, response: %s)", resp.Status, c.EmbeddingModel, responseBody.String())
 	}
 
+	// Try to decode as OllamaEmbedResponse
 	var embedResp OllamaEmbedResponse
-	if err := json.NewDecoder(resp.Body).Decode(&embedResp); err != nil {
-		return nil, fmt.Errorf("failed to decode embedding response: %w", err)
+	if err := json.Unmarshal(responseBody.Bytes(), &embedResp); err != nil {
+		return nil, fmt.Errorf("failed to decode embedding response: %w (raw: %s)", err, responseBody.String())
 	}
 
 	if len(embedResp.Embedding) == 0 {
-		return nil, fmt.Errorf("empty embedding returned from Ollama")
+		return nil, fmt.Errorf("empty embedding returned from Ollama (model: %s, response: %s)", c.EmbeddingModel, responseBody.String())
 	}
 
+	fmt.Printf("[EMBEDDING] Success! Got %d vectors\n", len(embedResp.Embedding))
 	return embedResp.Embedding, nil
 }
 
@@ -121,7 +147,7 @@ func (c *OllamaClient) Chat(messages []Message) (string, error) {
 func (c *OllamaClient) IsSQLQuery(question string) (bool, error) {
 	messages := []Message{
 		{
-			Role:    "system",
+			Role: "system",
 			Content: `You are a query classifier. Given a user question, determine if it requires a SQL query to answer.
 Respond with ONLY "yes" or "no" (lowercase). No other text.
 
