@@ -53,8 +53,7 @@ export function DocumentUpload({ onUploadComplete }: DocumentUploadProps) {
     [onUploadComplete]
   );
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleFileSelected = () => {
     const file = fileInputRef.current?.files?.[0];
     handleFileChange(file || null);
   };
@@ -68,7 +67,7 @@ export function DocumentUpload({ onUploadComplete }: DocumentUploadProps) {
 
   return (
     <div className="w-full">
-      <form onSubmit={handleSubmit} className="space-y-4">
+      <div className="space-y-4">
         <div className="border-2 border-dashed border-gray-300 rounded-xl p-8 text-center hover:border-blue-500 transition-colors">
           <input
             ref={fileInputRef}
@@ -76,21 +75,17 @@ export function DocumentUpload({ onUploadComplete }: DocumentUploadProps) {
             accept=".pdf,.txt,.docx"
             className="hidden"
             disabled={uploading}
+            onChange={handleFileSelected}
           />
 
           {!uploading && !result && !error && (
             <button
-              type="submit"
-              disabled={!fileInputRef.current?.files?.length}
+              type="button"
               onClick={() => fileInputRef.current?.click()}
-              className="flex flex-col items-center gap-3 text-gray-600 disabled:text-gray-400"
+              className="flex flex-col items-center gap-3 text-gray-600 hover:text-blue-500 transition-colors"
             >
               <Upload className="w-10 h-10" />
-              <span className="text-sm">
-                {fileInputRef.current?.files?.length
-                  ? fileInputRef.current.files[0].name
-                  : "Click to select a file"}
-              </span>
+              <span className="text-sm">Click to select a file</span>
               <span className="text-xs text-gray-400">PDF, TXT, DOCX (max 50MB)</span>
             </button>
           )}
@@ -148,7 +143,7 @@ export function DocumentUpload({ onUploadComplete }: DocumentUploadProps) {
             </div>
           )}
         </div>
-      </form>
+      </div>
     </div>
   );
 }

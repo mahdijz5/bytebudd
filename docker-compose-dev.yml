@@ -1,0 +1,60 @@
+# Development Docker Compose
+# Only runs infrastructure services - backend and frontend run locally
+services:
+  # ── PostgreSQL (ByteBudd internal DB) ─────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: bytebudd-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=bytebudd
+      - POSTGRES_USER=bytebudd
+      - POSTGRES_PASSWORD=bytebudd_secret
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bytebudd -d bytebudd"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - bytebudd-dev-net
+
+  # ── Qdrant (Vector Database for RAG) ──────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant
+    container_name: bytebudd-qdrant
+    ports:
+      - "6333:6333"  # REST API
+      - "6334:6334"  # gRPC
+    volumes:
+      - ./data/qdrant:/qdrant/storage
+    restart: unless-stopped
+    networks:
+      - bytebudd-dev-net
+
+  # ── pgadmin (Optional - for database management) ──────────────────────────
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: bytebudd-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@bytebudd.com
+      PGADMIN_DEFAULT_PASSWORD: admin123
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - postgres
+    networks:
+      - bytebudd-dev-net
+    restart: unless-stopped
+
+networks:
+  bytebudd-dev-net:
+    driver: bridge
+
+volumes:
+  pgadmin_data:

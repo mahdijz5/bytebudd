@@ -27,5 +27,8 @@ pyodbc==5.2.0
 # HTTP client (for Ollama)
 httpx==0.28.1
 
+# Form data parsing for FastAPI
+python-multipart==0.0.9
+
 # Encryption for stored passwords
 cryptography==44.0.0

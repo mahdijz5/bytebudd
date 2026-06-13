@@ -41,6 +41,7 @@ out/
 
 # ── Docker volumes (local data) ───────────────────────────────────────────────
 data/postgres/
+data/qdrant/
 data/mysql/
 frontend/.next/
 
