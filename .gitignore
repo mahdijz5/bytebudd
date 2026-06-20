@@ -38,7 +38,7 @@ yarn-error.log*
 .next/
 out/
 .vercel/
-
+frontend-temp/*
 # ── Docker volumes (local data) ───────────────────────────────────────────────
 data/postgres/
 data/qdrant/
