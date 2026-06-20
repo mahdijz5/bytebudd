@@ -15,6 +15,7 @@ from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.models.user import User
 from app.services.rag_proxy import rag_proxy
+from app.models.document import Document
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -86,18 +87,32 @@ async def rag_upload_file(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Upload a file (PDF/TXT/DOCX) to the RAG service for processing."""
+    """Upload a file (PDF/TXT/DOCX) to the RAG service for processing.
+    
+    The RAG service handles all document tracking (creation, status updates).
+    This endpoint simply forwards the file and returns the RAG service response.
+    """
     try:
         file_data = await file.read()
         
         if len(file_data) > 50 * 1024 * 1024:  # 50MB limit
             raise HTTPException(status_code=400, detail="File too large. Maximum size is 50MB.")
         
-        result = await rag_proxy.upload_file(file_data, file.filename)
+        result = await rag_proxy.upload_file(file_data, file.filename, user_id=current_user.id)
+        
+        # Check if the RAG service reported an error
+        if not result.get("success", True):
+            raise HTTPException(
+                status_code=500, 
+                detail=result.get("error", "File processing failed")
+            )
+        
+        # The document_id is returned by the RAG service (it creates the record)
+        document_id = result.get("file_id")
         
         return {
-            "success": result.get("success", True),
-            "file_id": result.get("file_id", ""),
+            "success": True,
+            "document_id": document_id,
             "filename": result.get("filename", file.filename),
             "chunks_count": result.get("chunks_count", 0),
             "message": result.get("message", "File processed successfully"),
@@ -107,6 +122,77 @@ async def rag_upload_file(
     except Exception as e:
         logger.exception("File upload error: %s", e)
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
+@router.get("/documents")
+async def list_documents(
+    limit: int = 50,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List all documents for the current user."""
+    try:
+        result = await rag_proxy.list_documents(
+            user_id=current_user.id,
+            limit=limit,
+            offset=offset,
+        )
+        
+        return {
+            "documents": result.get("documents", []),
+            "total": result.get("total", 0),
+        }
+    except Exception as e:
+        logger.exception("List documents error: %s", e)
+        raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")
+
+
+@router.get("/documents/{document_id}")
+async def get_document(
+    document_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get a single document by ID."""
+    try:
+        result = await rag_proxy.get_document(document_id)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Get document error: %s", e)
+        raise HTTPException(status_code=500, detail=f"Failed to get document: {str(e)}")
+
+
+@router.delete("/documents/{document_id}")
+async def delete_document(
+    document_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Delete a document and its associated data (Qdrant vectors, file, chunks).
+    
+    The RAG service handles the actual deletion:
+    1. Gets Qdrant point IDs from document_chunks table
+    2. Deletes points from Qdrant
+    3. Deletes chunk records from document_chunks
+    4. Soft deletes the document
+    5. Deletes the physical file
+    """
+    try:
+        # Call RAG service to delete everything (Qdrant + chunks + file + document)
+        result = await rag_proxy.delete_document(document_id)
+        
+        return {
+            "success": True,
+            "message": result.get("message", "Document deleted successfully"),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Delete document error: %s", e)
+        raise HTTPException(status_code=500, detail=f"Failed to delete document: {str(e)}")
 
 
 @router.get("/health")

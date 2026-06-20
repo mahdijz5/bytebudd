@@ -268,10 +268,32 @@ export interface RAGQueryResponse {
 
 export interface UploadResponse {
   success: boolean;
-  file_id: string;
+  file_id: number;
+  document_id: number;
   filename: string;
   chunks_count: number;
   message: string;
+}
+
+export interface DocumentInfo {
+  id: number;
+  user_id: number;
+  filename: string;
+  original_filename: string;
+  file_path: string;
+  file_size: number;
+  file_type: string;
+  status: string;
+  chunks_count: number;
+  error_message?: string;
+  is_deleted: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DocumentsListResponse {
+  documents: DocumentInfo[];
+  total: number;
 }
 
 // RAG query with SSE streaming
@@ -370,3 +392,21 @@ export async function uploadRAGFile(
   onProgress?.(100);
   return response.json();
 }
+
+// ── RAG Document Management API ───────────────────────────────────────────
+
+export const documentApi = {
+  // List all documents for the current user
+  list: (limit: number = 50, offset: number = 0) =>
+    apiFetch<DocumentsListResponse>(`/rag/documents?limit=${limit}&offset=${offset}`),
+
+  // Get a single document by ID
+  get: (documentId: number) =>
+    apiFetch<DocumentInfo>(`/rag/documents/${documentId}`),
+
+  // Delete a document (also removes from Qdrant vector DB)
+  delete: (documentId: number) =>
+    apiFetch<{ success: boolean; message: string }>(`/rag/documents/${documentId}`, {
+      method: "DELETE",
+    }),
+};

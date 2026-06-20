@@ -57,6 +57,11 @@ class Settings(BaseSettings):
         default="http://host.docker.internal:8081", alias="RAG_SERVICE_URL"
     )
 
+    # ── Document Storage ─────────────────────────────────────────────────
+    document_storage_path: str = Field(
+        default="/app/data/documents", alias="DOCUMENT_STORAGE_PATH"
+    )
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",")]

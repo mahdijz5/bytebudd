@@ -5,20 +5,53 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 // UploadResponse is the response returned after file upload.
 type UploadResponse struct {
 	Success     bool   `json:"success"`
-	FileID      string `json:"file_id"`
+	FileID      int64  `json:"file_id"`
 	Filename    string `json:"filename"`
 	ChunksCount int    `json:"chunks_count"`
 	Message     string `json:"message"`
+	Status      string `json:"status"`
+}
+
+// DeleteResponse is the response returned after document deletion.
+type DeleteResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
+// DocumentInfo contains information about a document.
+type DocumentInfo struct {
+	ID           int64     `json:"id"`
+	UserID       int64     `json:"user_id"`
+	Filename     string    `json:"filename"`
+	OriginalName string    `json:"original_filename"`
+	FilePath     string    `json:"file_path"`
+	FileSize     int       `json:"file_size"`
+	FileType     string    `json:"file_type"`
+	Status       string    `json:"status"`
+	ChunksCount  int       `json:"chunks_count"`
+	ErrorMessage string    `json:"error_message,omitempty"`
+	IsDeleted    bool      `json:"is_deleted"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// DocumentsListResponse is the response for listing documents.
+type DocumentsListResponse struct {
+	Documents []DocumentInfo `json:"documents"`
+	Total     int            `json:"total"`
 }
 
 // SourceInfo contains information about a retrieved source chunk.
@@ -47,16 +80,18 @@ type RAGHandler struct {
 	config  *Config
 	ollama  *OllamaClient
 	qdrant  *QdrantClient
+	db      *DatabaseClient
 	parser  *FileParser
 	chunker *Chunker
 }
 
 // NewRAGHandler creates a new RAGHandler.
-func NewRAGHandler(config *Config, ollama *OllamaClient, qdrant *QdrantClient, parser *FileParser, chunker *Chunker) *RAGHandler {
+func NewRAGHandler(config *Config, ollama *OllamaClient, qdrant *QdrantClient, db *DatabaseClient, parser *FileParser, chunker *Chunker) *RAGHandler {
 	return &RAGHandler{
 		config:  config,
 		ollama:  ollama,
 		qdrant:  qdrant,
+		db:      db,
 		parser:  parser,
 		chunker: chunker,
 	}
@@ -67,7 +102,7 @@ func (h *RAGHandler) SetupRoutes(router *gin.Engine) {
 	// Apply CORS middleware
 	router.Use(cors.New(cors.Config{
 		AllowOrigins:     h.config.CORSOrigins,
-		AllowMethods:     []string{"GET", "POST", "OPTIONS"},
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Requested-With"},
 		ExposeHeaders:    []string{"Content-Length"},
 		AllowCredentials: true,
@@ -79,6 +114,11 @@ func (h *RAGHandler) SetupRoutes(router *gin.Engine) {
 
 	// File upload
 	router.POST("/upload", h.UploadHandler)
+
+	// Document management
+	router.GET("/documents", h.ListDocumentsHandler)
+	router.GET("/documents/:id", h.GetDocumentHandler)
+	router.DELETE("/documents/:id", h.DeleteDocumentHandler)
 
 	// Query
 	router.POST("/query", h.QueryHandler)
@@ -96,6 +136,28 @@ func (h *RAGHandler) HealthHandler(c *gin.Context) {
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	}
 	c.JSON(http.StatusOK, response)
+}
+
+// saveFile saves the uploaded file to the storage directory.
+func (h *RAGHandler) saveFile(data []byte, filename string) (string, error) {
+	// Create user directory if needed
+	userDir := filepath.Join(h.config.DocumentStoragePath, "files")
+	if err := os.MkdirAll(userDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create storage directory: %w", err)
+	}
+
+	// Create a unique filename to avoid collisions
+	ext := filepath.Ext(filename)
+	name := strings.TrimSuffix(filename, ext)
+	uniqueName := fmt.Sprintf("%s_%s%s", name, uuid.New().String(), ext)
+	filePath := filepath.Join(userDir, uniqueName)
+
+	// Write file to disk
+	if err := os.WriteFile(filePath, data, 0644); err != nil {
+		return "", fmt.Errorf("failed to save file: %w", err)
+	}
+
+	return filePath, nil
 }
 
 // UploadHandler accepts a file, parses it, chunks it, generates embeddings, and stores in Qdrant.
@@ -126,6 +188,23 @@ func (h *RAGHandler) UploadHandler(c *gin.Context) {
 		return
 	}
 
+	// Get optional user_id from form (passed from backend)
+	userID := int64(1) // default user
+	if userIDStr := c.PostForm("user_id"); userIDStr != "" {
+		if _, err := fmt.Sscanf(userIDStr, "%d", &userID); err != nil {
+			log.Printf("%s WARNING: Invalid user_id: %v, using default", logPrefix, err)
+		}
+	}
+
+	// Get optional document_id from form (for re-uploading)
+	var existingDocID *int64
+	if docIDStr := c.PostForm("document_id"); docIDStr != "" {
+		var docID int64
+		if _, err := fmt.Sscanf(docIDStr, "%d", &docID); err == nil {
+			existingDocID = &docID
+		}
+	}
+
 	// Open the file
 	src, err := file.Open()
 	if err != nil {
@@ -150,6 +229,29 @@ func (h *RAGHandler) UploadHandler(c *gin.Context) {
 	}
 
 	log.Printf("%s File content read: %d bytes", logPrefix, len(data))
+
+	// Determine file type
+	fileType := ""
+	switch {
+	case strings.HasSuffix(strings.ToLower(file.Filename), ".pdf"):
+		fileType = "application/pdf"
+	case strings.HasSuffix(strings.ToLower(file.Filename), ".txt"):
+		fileType = "text/plain"
+	case strings.HasSuffix(strings.ToLower(file.Filename), ".docx"):
+		fileType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	}
+
+	// Save file to disk
+	filePath, err := h.saveFile(data, file.Filename)
+	if err != nil {
+		log.Printf("%s ERROR: Failed to save file: %v", logPrefix, err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   "Failed to save file: " + err.Error(),
+		})
+		return
+	}
+	log.Printf("%s File saved to: %s", logPrefix, filePath)
 
 	// Parse the file to extract text
 	log.Printf("%s Parsing file: %s", logPrefix, file.Filename)
@@ -188,8 +290,32 @@ func (h *RAGHandler) UploadHandler(c *gin.Context) {
 
 	log.Printf("%s Created %d chunks from file", logPrefix, len(chunks))
 
+	// Create the document record in database BEFORE processing (needed for document_id in Qdrant)
+	var docID int64
+	var existingDocIDVal int64 // value to use when setting DocumentID
+	if existingDocID != nil {
+		docID = *existingDocID
+		existingDocIDVal = *existingDocID
+		log.Printf("%s Using existing document: %d", logPrefix, docID)
+	} else {
+		log.Printf("%s Creating new document record for user %d", logPrefix, userID)
+		var err error
+		docID, err = h.db.CreateDocument(userID, file.Filename, file.Filename, filePath, int(file.Size), fileType)
+		if err != nil {
+			log.Printf("%s ERROR: Failed to create document record: %v", logPrefix, err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"error":   "Failed to create document record: " + err.Error(),
+			})
+			return
+		}
+		existingDocIDVal = docID
+		log.Printf("%s Document record created with ID: %d", logPrefix, docID)
+	}
+
 	// Generate embeddings for each chunk and build document chunks
 	var documentChunks []DocumentChunk
+	var chunkInfos []ChunkInfo
 	for i, chunkText := range chunks {
 		select {
 		case <-c.Request.Context().Done():
@@ -214,14 +340,27 @@ func (h *RAGHandler) UploadHandler(c *gin.Context) {
 		}
 		log.Printf("%s Embedding %d generated successfully (dim=%d)", logPrefix, i+1, len(vector))
 
+		// Generate a UUID for this point
+		pointID := uuid.New().String()
+
 		documentChunks = append(documentChunks, DocumentChunk{
+			ID:          pointID,
 			PageContent: chunkText,
 			Source:      file.Filename,
 			Vector:      vector,
+			DocumentID:  existingDocIDVal, // Add document_id to the chunk for tracking
+		})
+
+		chunkInfos = append(chunkInfos, ChunkInfo{
+			PointID:     pointID,
+			ChunkIndex:  i,
+			PageContent: chunkText,
+			Source:      file.Filename,
+			VectorDim:   len(vector),
 		})
 	}
 
-	// Upsert all chunks into Qdrant
+	// Upsert all chunks into Qdrant (with document_id in payload)
 	log.Printf("%s Upserting %d chunks to Qdrant...", logPrefix, len(documentChunks))
 	if err := h.qdrant.UpsertChunks(documentChunks); err != nil {
 		log.Printf("%s ERROR: Failed to upsert chunks to Qdrant: %v", logPrefix, err)
@@ -231,22 +370,212 @@ func (h *RAGHandler) UploadHandler(c *gin.Context) {
 		})
 		return
 	}
-
 	log.Printf("%s Successfully stored %d chunks in Qdrant", logPrefix, len(documentChunks))
 
-	// Generate a simple file ID based on filename and timestamp
-	fileID := "upload_" + strings.ReplaceAll(strings.ReplaceAll(file.Filename, ".", "_"), " ", "_") + "_" + time.Now().Format("20060102150405")
-
-	response := UploadResponse{
-		Success:     true,
-		FileID:      fileID,
-		Filename:    file.Filename,
-		ChunksCount: len(documentChunks),
-		Message:     "File processed successfully",
+	// Store chunk-point mappings in PostgreSQL
+	log.Printf("%s Storing chunk mappings in PostgreSQL...", logPrefix)
+	if err := h.db.StoreDocumentChunks(docID, chunkInfos); err != nil {
+		log.Printf("%s ERROR: Failed to store chunk mappings: %v", logPrefix, err)
+		// Don't fail the whole operation, just log the error
 	}
 
-	log.Printf("%s Upload complete: fileID=%s, chunks=%d", logPrefix, fileID, len(documentChunks))
+	// Update document status to completed
+	chunksInt := len(chunks)
+	if err := h.db.UpdateDocumentStatus(docID, "completed", nil, &chunksInt); err != nil {
+		log.Printf("%s WARNING: Failed to update document status to completed: %v", logPrefix, err)
+	}
+
+	log.Printf("%s Upload complete: docID=%d, chunks=%d", logPrefix, docID, len(chunks))
+	response := UploadResponse{
+		Success:     true,
+		FileID:      docID,
+		Filename:    file.Filename,
+		ChunksCount: len(chunks),
+		Message:     "File processed successfully",
+		Status:      "completed",
+	}
 	c.JSON(http.StatusOK, response)
+}
+
+// ListDocumentsHandler returns a list of documents for the user.
+func (h *RAGHandler) ListDocumentsHandler(c *gin.Context) {
+	logPrefix := "[DOCUMENTS]"
+
+	// Get optional user_id from query
+	userID := int64(1) // default user
+	if userIDStr := c.Query("user_id"); userIDStr != "" {
+		if _, err := fmt.Sscanf(userIDStr, "%d", &userID); err != nil {
+			log.Printf("%s WARNING: Invalid user_id: %v, using default", logPrefix, err)
+		}
+	}
+
+	// Get pagination params
+	limit := 50
+	offset := 0
+	if limitStr := c.Query("limit"); limitStr != "" {
+		fmt.Sscanf(limitStr, "%d", &limit)
+	}
+	if offsetStr := c.Query("offset"); offsetStr != "" {
+		fmt.Sscanf(offsetStr, "%d", &offset)
+	}
+
+	log.Printf("%s Listing documents for user %d (limit=%d, offset=%d)", logPrefix, userID, limit, offset)
+
+	documents, err := h.db.ListUserDocuments(userID, limit, offset)
+	if err != nil {
+		log.Printf("%s ERROR: Failed to list documents: %v", logPrefix, err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   "Failed to list documents: " + err.Error(),
+		})
+		return
+	}
+
+	// Convert to DocumentInfo slice
+	var docInfos []DocumentInfo
+	for _, doc := range documents {
+		var docInfo DocumentInfo
+		if id, ok := doc["id"].(int64); ok {
+			docInfo.ID = id
+		}
+		if uid, ok := doc["user_id"].(int64); ok {
+			docInfo.UserID = uid
+		}
+		if fn, ok := doc["filename"].(string); ok {
+			docInfo.Filename = fn
+		}
+		if ofn, ok := doc["original_filename"].(string); ok {
+			docInfo.OriginalName = ofn
+		}
+		if fp, ok := doc["file_path"].(string); ok {
+			docInfo.FilePath = fp
+		}
+		if fs, ok := doc["file_size"].(int); ok {
+			docInfo.FileSize = fs
+		}
+		if ft, ok := doc["file_type"].(string); ok {
+			docInfo.FileType = ft
+		}
+		if st, ok := doc["status"].(string); ok {
+			docInfo.Status = st
+		}
+		if cc, ok := doc["chunks_count"].(int); ok {
+			docInfo.ChunksCount = cc
+		}
+		if em, ok := doc["error_message"].(string); ok {
+			docInfo.ErrorMessage = em
+		}
+		if del, ok := doc["is_deleted"].(bool); ok {
+			docInfo.IsDeleted = del
+		}
+		if ca, ok := doc["created_at"].(string); ok {
+			if t, err := time.Parse(time.RFC3339, ca); err == nil {
+				docInfo.CreatedAt = t
+			}
+		}
+		if ua, ok := doc["updated_at"].(string); ok {
+			if t, err := time.Parse(time.RFC3339, ua); err == nil {
+				docInfo.UpdatedAt = t
+			}
+		}
+		docInfos = append(docInfos, docInfo)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"documents": docInfos,
+		"total":     len(docInfos),
+	})
+}
+
+// GetDocumentHandler returns a single document by ID.
+func (h *RAGHandler) GetDocumentHandler(c *gin.Context) {
+	logPrefix := "[DOCUMENT]"
+
+	idStr := c.Param("id")
+	var docID int64
+	if _, err := fmt.Sscanf(idStr, "%d", &docID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "Invalid document ID",
+		})
+		return
+	}
+
+	log.Printf("%s Getting document %d", logPrefix, docID)
+
+	doc, err := h.db.GetDocumentByID(docID, nil)
+	if err != nil {
+		log.Printf("%s ERROR: %v", logPrefix, err)
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"document": doc,
+	})
+}
+
+// DeleteDocumentHandler deletes a document and its associated data.
+func (h *RAGHandler) DeleteDocumentHandler(c *gin.Context) {
+	logPrefix := "[DELETE]"
+
+	idStr := c.Param("id")
+	var docID int64
+	if _, err := fmt.Sscanf(idStr, "%d", &docID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "Invalid document ID",
+		})
+		return
+	}
+
+	log.Printf("%s Deleting document %d", logPrefix, docID)
+
+	// Delete points from Qdrant using document_id filter
+	log.Printf("%s Deleting Qdrant points with document_id=%d", logPrefix, docID)
+	if _, err := h.qdrant.DeletePointsByDocumentID(docID); err != nil {
+		log.Printf("%s WARNING: Failed to delete points from Qdrant: %v", logPrefix, err)
+		// Continue with database deletion even if Qdrant delete fails
+	} else {
+		log.Printf("%s Successfully deleted Qdrant points for document %d", logPrefix, docID)
+	}
+
+	// Delete chunk records from database
+	if err := h.db.DeleteDocumentChunks(docID); err != nil {
+		log.Printf("%s WARNING: Failed to delete document chunks from database: %v", logPrefix, err)
+	}
+
+	// Soft delete the document
+	if err := h.db.SoftDeleteDocument(docID); err != nil {
+		log.Printf("%s ERROR: Failed to soft delete document: %v", logPrefix, err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   "Failed to delete document: " + err.Error(),
+		})
+		return
+	}
+
+	// Delete the physical file
+	log.Printf("%s Deleting physical file for document %d", logPrefix, docID)
+	doc, err := h.db.GetDocumentByID(docID, nil)
+	if err == nil {
+		if filePath, ok := doc["file_path"].(string); ok && filePath != "" {
+			if err := os.Remove(filePath); err != nil {
+				log.Printf("%s WARNING: Failed to delete file %s: %v", logPrefix, filePath, err)
+			} else {
+				log.Printf("%s Successfully deleted file: %s", logPrefix, filePath)
+			}
+		}
+	}
+
+	log.Printf("%s Document %d deleted successfully", logPrefix, docID)
+	c.JSON(http.StatusOK, DeleteResponse{
+		Success: true,
+		Message: fmt.Sprintf("Document '%s' deleted successfully", idStr),
+	})
 }
 
 // QueryHandler processes a user query - classifies it and either returns SQL flag or performs RAG.
@@ -373,4 +702,9 @@ Provide clear, concise, and helpful answers.`,
 	}
 
 	return h.ollama.Chat(messages)
+}
+
+// stringPtr returns a pointer to the given string.
+func stringPtr(s string) *string {
+	return &s
 }

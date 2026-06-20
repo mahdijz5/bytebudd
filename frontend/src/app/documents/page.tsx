@@ -5,25 +5,31 @@ import { useRouter } from "next/navigation";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { DocumentUpload, DocumentList } from "@/components/upload/DocumentUpload";
 import { isAuthenticated } from "@/lib/auth";
-import { FileText, Upload } from "lucide-react";
+import { documentApi, DocumentInfo, DocumentsListResponse } from "@/lib/api";
+import { FileText, Upload, Trash2, RefreshCw } from "lucide-react";
 import { User } from "@/types";
-
-interface DocumentInfo {
-  id: string;
-  name: string;
-  chunks: number;
-  date: string;
-}
 
 export default function DocumentsPage() {
   const router = useRouter();
   const [user, setUser] = useState<{ email: string; role: string } | null>(null);
-  const [documents, setDocuments] = useState<DocumentInfo[]>([
-    // Mock data - will be replaced with API call
-    { id: "1", name: "company_handbook.pdf", chunks: 45, date: "2024-01-15" },
-    { id: "2", name: "product_specs.docx", chunks: 23, date: "2024-01-14" },
-  ]);
+  const [documents, setDocuments] = useState<DocumentInfo[]>([]);
+  const [totalDocuments, setTotalDocuments] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
+
+  // Fetch documents from API
+  const fetchDocuments = async () => {
+    try {
+      setLoading(true);
+      const response: DocumentsListResponse = await documentApi.list(50, 0);
+      setDocuments(response.documents || []);
+      setTotalDocuments(response.total || 0);
+    } catch (error) {
+      console.error("Failed to fetch documents:", error);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
     if (!isAuthenticated()) {
@@ -31,15 +37,28 @@ export default function DocumentsPage() {
       return;
     }
     // In production, fetch user from API
-    setLoading(false);
+    fetchDocuments();
   }, []);
 
-  const handleUploadComplete = () => {
-    // In production, refresh document list from API
+  const handleUploadComplete = async () => {
+    await fetchDocuments();
   };
 
-  const handleDelete = (id: string) => {
-    setDocuments((prev) => prev.filter((d) => d.id !== id));
+  const handleDelete = async (id: number) => {
+    if (!confirm("Are you sure you want to delete this document? This will also remove it from the vector database.")) {
+      return;
+    }
+
+    try {
+      setDeletingId(id);
+      await documentApi.delete(id);
+      await fetchDocuments();
+    } catch (error) {
+      console.error("Failed to delete document:", error);
+      alert("Failed to delete document. Please try again.");
+    } finally {
+      setDeletingId(null);
+    }
   };
 
   if (loading) {
@@ -62,12 +81,21 @@ export default function DocumentsPage() {
         <div className="max-w-4xl mx-auto p-8">
           {/* Header */}
           <div className="mb-8">
-            <div className="flex items-center gap-3 mb-2">
-              <FileText className="w-8 h-8 text-blue-600" />
-              <h1 className="text-2xl font-bold text-gray-900">Document Management</h1>
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-3">
+                <FileText className="w-8 h-8 text-blue-600" />
+                <h1 className="text-2xl font-bold text-gray-900">Document Management</h1>
+              </div>
+              <button
+                onClick={fetchDocuments}
+                className="flex items-center gap-2 px-3 py-2 text-sm bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+              >
+                <RefreshCw className="w-4 h-4" />
+                Refresh
+              </button>
             </div>
             <p className="text-gray-600">
-              Upload documents for the AI to search through. Supported formats: PDF, TXT, DOCX
+              {totalDocuments} document{totalDocuments !== 1 ? "s" : ""} uploaded · Supported formats: PDF, TXT, DOCX
             </p>
           </div>
 
@@ -82,8 +110,23 @@ export default function DocumentsPage() {
 
           {/* Document list */}
           <div className="bg-white rounded-xl border border-gray-200 p-6">
-            <h2 className="text-lg font-semibold mb-4">Uploaded Documents</h2>
-            <DocumentList documents={documents} onDelete={handleDelete} />
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold">Uploaded Documents</h2>
+              <span className="text-sm text-gray-500">Total: {totalDocuments}</span>
+            </div>
+            <DocumentList 
+              documents={documents.map(doc => ({
+                id: doc.id.toString(),
+                name: doc.original_filename || doc.filename,
+                chunks: doc.chunks_count,
+                date: new Date(doc.created_at).toLocaleDateString(),
+                status: doc.status,
+                fileSize: doc.file_size,
+                fileType: doc.file_type,
+                errorMessage: doc.error_message,
+              }))}
+              onDelete={(id: string) => handleDelete(parseInt(id))}
+            />
           </div>
         </div>
       </main>

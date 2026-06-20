@@ -33,6 +33,15 @@ func main() {
 		log.Fatalf("Failed to ensure Qdrant collection: %v", err)
 	}
 
+	// Connect to PostgreSQL for document tracking
+	db, err := NewDatabaseClient(config.getDSN())
+	if err != nil {
+		log.Fatalf("Failed to connect to PostgreSQL: %v", err)
+	}
+	defer db.Close()
+
+	log.Printf("Connected to PostgreSQL database")
+
 	// Create file parser
 	parser := NewFileParser()
 
@@ -40,11 +49,17 @@ func main() {
 	chunker := NewChunker(config.ChunkSize, config.ChunkOverlap)
 
 	// Create RAG handler
-	handler := NewRAGHandler(config, ollama, qdrant, parser, chunker)
+	handler := NewRAGHandler(config, ollama, qdrant, db, parser, chunker)
 
 	// Setup Gin router
 	router := gin.Default()
 	handler.SetupRoutes(router)
+
+	// Create document storage directory if it doesn't exist
+	if err := os.MkdirAll(config.DocumentStoragePath, 0755); err != nil {
+		log.Fatalf("Failed to create document storage directory: %v", err)
+	}
+	log.Printf("Document storage path: %s", config.DocumentStoragePath)
 
 	// Start server
 	addr := fmt.Sprintf(":%d", config.Port)
@@ -53,6 +68,7 @@ func main() {
 	log.Printf("  - Chat Model: %s", config.ChatModel)
 	log.Printf("  - Qdrant: %s:%d", config.QdrantHost, config.QdrantPort)
 	log.Printf("  - Ollama: %s", config.OllamaURL)
+	log.Printf("  - PostgreSQL: %s:%d", config.PostgresHost, config.PostgresPort)
 	log.Printf("  - Collection: %s", config.CollectionName)
 
 	// Graceful shutdown

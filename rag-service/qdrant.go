@@ -22,6 +22,7 @@ type DocumentChunk struct {
 	Vector      []float32
 	PageContent string
 	Source      string
+	DocumentID  int64 // Added: document_id for tracking and deletion
 	Score       *float64
 }
 
@@ -60,12 +61,12 @@ func (c *QdrantClient) EnsureCollection() error {
 	}
 
 	fmt.Printf("Creating Qdrant collection '%s' with Cosine similarity...\n", c.collectionName)
-	
+
 	vectorsConfig := qdrant.NewVectorsConfig(&qdrant.VectorParams{
 		Size:     uint64(c.vectorSize),
 		Distance: qdrant.Distance_Cosine,
 	})
-	
+
 	err = c.client.CreateCollection(c.ctx, &qdrant.CreateCollection{
 		CollectionName: c.collectionName,
 		VectorsConfig:  vectorsConfig,
@@ -85,7 +86,8 @@ func (c *QdrantClient) UpsertChunks(chunks []DocumentChunk) error {
 		payload := make(map[string]*qdrant.Value)
 		payload["page_content"] = qdrant.NewValueString(chunk.PageContent)
 		payload["source"] = qdrant.NewValueString(chunk.Source)
-		
+		payload["document_id"] = qdrant.NewValueInt(int64(chunk.DocumentID))
+
 		point := &qdrant.PointStruct{
 			Id:      qdrant.NewIDUUID(uuid.New().String()),
 			Vectors: qdrant.NewVectorsDense(chunk.Vector),
@@ -105,6 +107,55 @@ func (c *QdrantClient) UpsertChunks(chunks []DocumentChunk) error {
 	return nil
 }
 
+// DeletePoints removes points from Qdrant by their IDs.
+func (c *QdrantClient) DeletePoints(pointIDs []string) error {
+	if len(pointIDs) == 0 {
+		return nil
+	}
+
+	// Build point IDs using the correct PointId structure
+	var pointIds []*qdrant.PointId
+	for _, id := range pointIDs {
+		pointIds = append(pointIds, qdrant.NewIDUUID(id))
+	}
+
+	_, err := c.client.Delete(c.ctx, &qdrant.DeletePoints{
+		CollectionName: c.collectionName,
+		Points:         qdrant.NewPointsSelectorIDs(pointIds),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to delete points from Qdrant: %w", err)
+	}
+
+	return nil
+}
+
+// DeletePointsByDocumentID removes points from Qdrant by document_id filter.
+func (c *QdrantClient) DeletePointsByDocumentID(documentID int64) (int64, error) {
+	// Create a condition that matches the document_id
+	condition := qdrant.NewMatchInt("document_id", documentID)
+
+	// Create a filter with the condition
+	filter := &qdrant.Filter{
+		Must: []*qdrant.Condition{condition},
+	}
+
+	// Delete points matching the filter
+	_, err := c.client.Delete(c.ctx, &qdrant.DeletePoints{
+		CollectionName: c.collectionName,
+		Points: &qdrant.PointsSelector{
+			PointsSelectorOneOf: &qdrant.PointsSelector_Filter{
+				Filter: filter,
+			},
+		},
+	})
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete points by document_id from Qdrant: %w", err)
+	}
+
+	return documentID, nil
+}
+
 // SearchSimilar searches for the top K most similar chunks to the query vector.
 func (c *QdrantClient) SearchSimilar(queryVector []float32, topK int) ([]DocumentChunk, error) {
 	limit := uint64(topK)
@@ -122,14 +173,14 @@ func (c *QdrantClient) SearchSimilar(queryVector []float32, topK int) ([]Documen
 	var chunks []DocumentChunk
 	for _, point := range searchResult {
 		var content, source string
-		
+
 		if p, ok := point.Payload["page_content"]; ok {
 			content = p.GetStringValue()
 		}
 		if p, ok := point.Payload["source"]; ok {
 			source = p.GetStringValue()
 		}
-		
+
 		score := float64(point.Score)
 
 		chunks = append(chunks, DocumentChunk{
